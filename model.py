@@ -84,31 +84,26 @@ class Alignment(nn.Module):
         L_iEndo = 0.0
         
         for T in range(hat_L):
-            # 权重 W_T 视为标量，切断梯度
-            Z_s_T_flat = Z_s[:, T].reshape(B, -1)
-            Z_t_T_flat = Z_t[:, T].reshape(B, -1)
-            W_T = deep_coral(Z_s_T_flat, Z_t_T_flat).detach() 
+            # 【修复显存炸弹】不要 reshape(B, -1)！
+            # 将 Sensor 维度融入 Batch 维度，保持特征维始终为 d (64)
+            # 这样计算出的 W_T 既能反映分布差异，又绝对不会 OOM (协方差仅 64x64)
+            Z_s_T_sensors = Z_s[:, T].reshape(B * N, d) 
+            Z_t_T_sensors = Z_t[:, T].reshape(B * N, d) 
             
-            # ==========================================
-            # 【完美解决 50GB OOM 的黑科技】
-            # 对于标量组成的边（1D相关性），其分布的协方差差异就是方差的差异。
-            # 直接按 Batch 维求方差，瞬间完成所有 11万 条边的对齐！
-            # ==========================================
+            W_T = deep_coral(Z_s_T_sensors, Z_t_T_sensors).detach() 
+            
+            # iSCA: 1D方差对齐相关性
             var_s = torch.var(E_s[:, T], dim=0, unbiased=True) # [N, N]
             var_t = torch.var(E_t[:, T], dim=0, unbiased=True) # [N, N]
             L_iSCA_T = torch.mean((var_s - var_t) ** 2) / 4.0
             
-            # iSFA：将 Batch 和 Sensor 维度合并，对齐特征分布 (特征维度仅为 d_model)
-            Z_s_T_sensors = Z_s[:, T].reshape(B * N, d) # [B*N, 64]
-            Z_t_T_sensors = Z_t[:, T].reshape(B * N, d) # [B*N, 64]
-            L_iSFA_T = deep_coral(Z_s_T_sensors, Z_t_T_sensors) # 64x64 的小协方差矩阵，极快
+            # iSFA: 特征分布对齐
+            L_iSFA_T = deep_coral(Z_s_T_sensors, Z_t_T_sensors) 
             
             L_iEndo += W_T * (self.lambda_sca * L_iSCA_T + self.lambda_sfa * L_iSFA_T)
         
-        # ==========================================
-        # Exo: 全局特征对齐，必须先 Pooling 降维，防止产生十万维的协方差爆炸！
-        # ==========================================
-        P_s = Z_s.mean(dim=(1, 2)) # 时间与传感器维度平均 [B, d_model]
+        # Exo: 全局特征对齐 (Pooling 降维防爆炸)
+        P_s = Z_s.mean(dim=(1, 2)) # [B, d_model]
         P_t = Z_t.mean(dim=(1, 2)) # [B, d_model]
         L_exo = deep_coral(P_s, P_t)
         
@@ -136,19 +131,30 @@ class PoseDecoder(nn.Module):
     def __init__(self, num_joints=17, d_model=128):
         super(PoseDecoder, self).__init__()
         self.mlp = nn.Linear(d_model, d_model)
+        
+        # 【核心修复】：引入可学习的关节身份 Embedding
+        # 这就像是给 17 个关节贴上了独特的“标签”，打破特征同质化
+        self.joint_embedding = nn.Parameter(torch.randn(1, num_joints, d_model))
+        
         self.gcn = SimpleGCN(d_model)
         encoder_layer = nn.TransformerEncoderLayer(d_model, nhead=4, batch_first=True)
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
         self.fc = nn.Linear(d_model, 3)
 
     def forward(self, Z):
-        Z_agg = Z.mean(dim=1)
-        Z_agg = self.mlp(Z_agg.mean(dim=1))
-        Z_joints = Z_agg.unsqueeze(1).repeat(1, 17, 1)
+        # Z: [B, hat_L, N, d_model]
+        Z_agg = Z.mean(dim=1)  # 时间维度池化 [B, N, d_model]
+        Z_agg = self.mlp(Z_agg.mean(dim=1))  # 传感器维度池化 [B, d_model]
         
+        # 复制全局特征并加上各自独特的关节 Embedding
+        Z_joints = Z_agg.unsqueeze(1).repeat(1, 17, 1)  # [B, 17, d_model]
+        Z_joints = Z_joints + self.joint_embedding      # 赋予独特性！[B, 17, d_model]
+        
+        # 此时送入 GCN 和 Transformer，才能真正发挥空间拓扑与注意力推断的作用
         Z_joints_gcn = self.gcn(Z_joints)
         Z_trans = self.transformer(Z_joints_gcn)
         poses = self.fc(Z_trans)
+        
         return poses
 
 class SEAplusplus(nn.Module):
