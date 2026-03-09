@@ -11,37 +11,39 @@ def mpjpe(pred, gt):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--root', default='/path/to/MMFi', type=str)
-    parser.add_argument('--source_env', default='E01', type=str)
-    parser.add_argument('--target_env', default='E02', type=str)
+    parser.add_argument('--root', default='D:\\MMFi', type=str)
+    # 【核心修改】：通过 nargs='+' 允许传入多个源域环境
+    parser.add_argument('--source_envs', nargs='+', default=['E01', 'E02', 'E03'], help='源域环境列表，例如: E01 E02 E03')
+    parser.add_argument('--target_env', default='E04', type=str, help='目标测试环境')
     parser.add_argument('--mode', default='train', type=str)
-    parser.add_argument('--epochs', default=5, type=int) # 调低 epoch 测试
+    parser.add_argument('--epochs', default=50, type=int) 
     parser.add_argument('--lr', default=0.001, type=float)
     parser.add_argument('--batch_size', default=16, type=int)
     args = parser.parse_args()
 
-    # 设备检测
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    model = SEAplusplus().to(device)
+    # 实例化模型 (确保这里的参数和你的 model.py 中一致)
+    model = SEAplusplus(num_sensors=342, d_patch=32, d_model=64, num_branches=3, num_joints=17).to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     criterion = nn.SmoothL1Loss()
 
-    source_loader, target_loader, test_loader = get_loaders(args.root, args.source_env, args.target_env, args.batch_size)
+    # 获取数据加载器
+    print(f"[*] 训练源域 (Source Domains): {args.source_envs}")
+    print(f"[*] 评估目标域 (Target Domain): {args.target_env}")
+    source_loader, target_loader, test_loader = get_loaders(args.root, args.source_envs, args.target_env, args.batch_size)
 
     if args.mode == 'train':
         for epoch in range(args.epochs):
             model.train()
             total_loss_val = 0
             
-            # 使用 cycle 保证小数据集循环以适配大数据集
             target_iter = itertools.cycle(target_loader)
             
             for step, (x_s, y_s) in enumerate(source_loader):
                 x_t, _ = next(target_iter)
                 
-                # 转移到 GPU/CPU
                 x_s, y_s = x_s.to(device), y_s.to(device)
                 x_t = x_t.to(device)
 
@@ -70,7 +72,6 @@ if __name__ == "__main__":
             for x, y in test_loader:
                 x, y = x.to(device), y.to(device)
                 poses = model(x, train=False)
-                # 计算 MPJPE 误差累加
                 mpjpe_total += mpjpe(poses, y).item() * y.size(0)
                 num += y.size(0)
-        print(f'Test MPJPE: {mpjpe_total / num:.4f}')
+        print(f'Test MPJPE: {mpjpe_total / num:.4f} 米 ({mpjpe_total / num * 1000:.2f} 毫米)')
