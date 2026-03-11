@@ -11,28 +11,31 @@ def mpjpe(pred, gt):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--root', default='D:\\MMFi', type=str)
-    # 【核心修改】：通过 nargs='+' 允许传入多个源域环境
-    parser.add_argument('--source_envs', nargs='+', default=['E01', 'E02', 'E03'], help='源域环境列表，例如: E01 E02 E03')
+    parser.add_argument('--root', default='/home/a123456/SEA-/MMFi', type=str)
+    parser.add_argument('--source_envs', nargs='+', default=['E01', 'E02', 'E03'], help='源域环境列表')
     parser.add_argument('--target_env', default='E04', type=str, help='目标测试环境')
     parser.add_argument('--mode', default='train', type=str)
     parser.add_argument('--epochs', default=50, type=int) 
-    parser.add_argument('--lr', default=0.001, type=float)
+    # 【修改】：学习率调低到 0.0001
+    parser.add_argument('--lr', default=0.0001, type=float)
     parser.add_argument('--batch_size', default=16, type=int)
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    # 实例化模型 (确保这里的参数和你的 model.py 中一致)
     model = SEAplusplus(num_sensors=342, d_patch=32, d_model=64, num_branches=3, num_joints=17).to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     criterion = nn.SmoothL1Loss()
 
-    # 获取数据加载器
     print(f"[*] 训练源域 (Source Domains): {args.source_envs}")
     print(f"[*] 评估目标域 (Target Domain): {args.target_env}")
+    
     source_loader, target_loader, test_loader = get_loaders(args.root, args.source_envs, args.target_env, args.batch_size)
+    
+    # 打印数据集大小，确认读取到了真实数据
+    print(f"🔥 实际加载的源域训练样本数: {len(source_loader.dataset)}")
+    print(f"🔥 实际加载的目标域测试样本数: {len(test_loader.dataset)}")
 
     if args.mode == 'train':
         for epoch in range(args.epochs):
@@ -54,6 +57,10 @@ if __name__ == "__main__":
                 total_loss = sup_loss + align_loss
                 
                 total_loss.backward()
+                
+                # 【防护 3】：梯度裁剪，死死锁住梯度爆炸
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
                 optimizer.step()
                 
                 total_loss_val += total_loss.item()

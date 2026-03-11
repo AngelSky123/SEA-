@@ -50,7 +50,8 @@ def main():
 
     # 3. 加载测试数据集
     print(f"[*] 正在准备目标域 ({args.target_env}) 的测试数据...")
-    test_dataset = MMFiDataset(args.root, env=args.target_env, mode='test')
+    # 【修复】：将 env= 改为 envs=
+    test_dataset = MMFiDataset(args.root, envs=args.target_env, mode='test')
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
 
     num_samples = len(test_dataset)
@@ -81,7 +82,7 @@ def main():
     final_mpjpe = mpjpe_total / num_samples
     print("="*50)
     print(f" 测试完成！")
-    print(f"目标环境 [{args.target_env}] 的最终 MPJPE (平均关节误差) 为: {final_mpjpe:.4f}")
+    print(f"目标环境 [{args.target_env}] 的最终 MPJPE (平均关节误差) 为: {final_mpjpe:.4f} 米 ({final_mpjpe * 1000:.2f} 毫米)")
     print("="*50)
 
 if __name__ == "__main__":
