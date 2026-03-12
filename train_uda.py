@@ -6,6 +6,19 @@ from data_loader import get_loaders
 import argparse
 import itertools
 
+# Human3.6M 连线标准
+EDGES = [(0,1), (1,2), (2,3), (0,4), (4,5), (5,6), (0,7), (7,8), (8,9),
+         (9,10), (8,11), (11,12), (12,13), (8,14), (14,15), (15,16)]
+
+def bone_length_loss(pred, gt):
+    """计算预测骨骼长度与真实骨骼长度的误差"""
+    loss = 0
+    for u, v in EDGES:
+        pred_len = torch.norm(pred[:, u, :] - pred[:, v, :], dim=-1)
+        gt_len = torch.norm(gt[:, u, :] - gt[:, v, :], dim=-1)
+        loss += torch.mean(torch.abs(pred_len - gt_len))
+    return loss / len(EDGES)
+
 def mpjpe(pred, gt):
     return torch.mean(torch.norm(pred - gt, dim=-1))
 
@@ -58,7 +71,11 @@ if __name__ == "__main__":
                 poses_s, align_loss = model(x_s, x_t, train=True)
                 
                 sup_loss = criterion(poses_s, y_s)
-                total_loss = sup_loss + align_loss
+                b_loss = bone_length_loss(poses_s, y_s) # 计算物理骨骼误差
+                
+                # 将坐标误差、骨骼误差和域对齐误差加在一起
+                # 0.5 是权重，可以调
+                total_loss = sup_loss + 0.5 * b_loss + align_loss
                 
                 total_loss.backward()
                 

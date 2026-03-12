@@ -109,6 +109,14 @@ class MMFiDataset(Dataset):
 
     def __getitem__(self, idx):
         csi, pose = self.samples[idx]
+        
+        # 仅在训练阶段随机注入噪声
+        if self.mode == 'train':
+            # 50% 的概率加入微小的高斯噪声，充当正则化器
+            if np.random.rand() > 0.5:
+                noise = np.random.normal(0, 0.05, csi.shape) # 0.05的噪声强度
+                csi = csi + noise
+                
         return torch.from_numpy(csi).float(), torch.from_numpy(pose).float()
 
 def get_loaders(root, source_envs=['E01', 'E02', 'E03'], target_env='E04', batch_size=32):

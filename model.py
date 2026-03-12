@@ -74,7 +74,7 @@ def deep_coral(H_s, H_t):
     return torch.norm(cov_s - cov_t, p='fro') ** 2 / (4 * f**2)
 
 class Alignment(nn.Module):
-    def __init__(self, lambda_sca=0.1, lambda_sfa=0.1):
+    def __init__(self, lambda_sca=0.01, lambda_sfa=0.01):
         super(Alignment, self).__init__()
         self.lambda_sca = lambda_sca
         self.lambda_sfa = lambda_sfa
