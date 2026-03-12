@@ -34,7 +34,9 @@ def main():
     # 1. 实例化与训练时结构完全一致的模型
     print("[*] 正在初始化 SEA++ 模型...")
     # 注意：这里的 d_patch=32, d_model=64 必须和你在 train_uda.py 中设置的一模一样
-    model = SEAplusplus(num_sensors=342, d_patch=32, d_model=64, num_branches=3, num_joints=17)
+    # d_patch=11：将时间分辨率提高，每 11 帧打包一次（297/11=27个动作块），捕捉更细腻的动作
+    # d_model=128：特征维度翻倍，让网络能记住更复杂的空间映射关系
+    model = SEAplusplus(num_sensors=342, d_patch=11, d_model=128, num_branches=3, num_joints=17).to(device)
     model = model.to(device)
 
     # 2. 加载训练好的权重

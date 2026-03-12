@@ -24,9 +24,13 @@ if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    model = SEAplusplus(num_sensors=342, d_patch=32, d_model=64, num_branches=3, num_joints=17).to(device)
+    # d_patch=11：将时间分辨率提高，每 11 帧打包一次（297/11=27个动作块），捕捉更细腻的动作
+    # d_model=128：特征维度翻倍，让网络能记住更复杂的空间映射关系
+    model = SEAplusplus(num_sensors=342, d_patch=11, d_model=128, num_branches=3, num_joints=17).to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     criterion = nn.SmoothL1Loss()
+    # 【新增代码 1】：加入余弦退火学习率调度器，让学习率像平滑的波浪一样慢慢降到接近 0
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
 
     print(f"[*] 训练源域 (Source Domains): {args.source_envs}")
     print(f"[*] 评估目标域 (Target Domain): {args.target_env}")
@@ -64,6 +68,12 @@ if __name__ == "__main__":
                 optimizer.step()
                 
                 total_loss_val += total_loss.item()
+                # 【新增代码 2】：每个 Epoch 跑完后，让调度器更新一次学习率
+            scheduler.step()
+
+            # 【优化打印】：顺便把当前学习率打印出来，看着它慢慢变小
+            current_lr = scheduler.get_last_lr()[0]
+            print(f'Epoch {epoch+1}/{args.epochs} | LR: {current_lr:.6f} | Avg Loss: {total_loss_val/len(source_loader):.4f}')
                 
             print(f'Epoch {epoch+1}/{args.epochs} | Avg Loss: {total_loss_val/len(source_loader):.4f}')
             
