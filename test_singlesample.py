@@ -5,17 +5,13 @@ import torch
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
-# 导入你的模型
 from model import SEAplusplus
 
 def load_single_sample(csi_dir, pose_path, L=297):
-    """
-    加载并预处理单个样本，逻辑与 data_loader.py 完全一致
-    """
     # 1. 加载真实的 3D Pose
     pose_array = np.load(pose_path)
     if pose_array.ndim == 3: 
-        pose_gt = np.mean(pose_array, axis=0) # [17, 3]
+        pose_gt = np.mean(pose_array, axis=0)
     else:
         pose_gt = pose_array
 
@@ -49,7 +45,7 @@ def load_single_sample(csi_dir, pose_path, L=297):
         pad_width = ((0, 0), (0, L - L_current))
         seq_amp = np.pad(seq_amp, pad_width, mode='constant', constant_values=0)
         
-    # 4. 数据清洗与 Z-score 归一化 (核心！必须和训练时一样)
+    # 4. 数据清洗与 Z-score 归一化
     seq_amp = np.nan_to_num(seq_amp, nan=0.0, posinf=0.0, neginf=0.0)
     pose_gt = np.nan_to_num(pose_gt, nan=0.0, posinf=0.0, neginf=0.0)
     
@@ -58,50 +54,71 @@ def load_single_sample(csi_dir, pose_path, L=297):
     
     return seq_amp, pose_gt
 
-def plot_3d_pose(pose_gt, pose_pred, mpjpe_error):
-    # 1. 恢复为绝对正确的 MM-Fi (Human3.6M) 17关节连线
+def compute_similarity_transform(S1, S2):
+    """普氏分析 (Procrustes Analysis) 核心算法"""
+    trans1 = S1.mean(axis=0)
+    trans2 = S2.mean(axis=0)
+    S1 = S1 - trans1
+    S2 = S2 - trans2
+    scale1 = np.linalg.norm(S1)
+    scale2 = np.linalg.norm(S2)
+    
+    if scale1 == 0 or scale2 == 0:
+        return S1, S2
+        
+    S1 = S1 / scale1
+    S2 = S2 / scale2
+    
+    U, s, Vh = np.linalg.svd(np.dot(S1.T, S2))
+    R = np.dot(U, Vh)
+    
+    if np.linalg.det(R) < 0:
+        Vh[-1] *= -1
+        s[-1] *= -1
+        R = np.dot(U, Vh)
+        
+    s_opt = sum(s) * (scale2 / scale1)
+    S1_opt = S1 * scale1 * s_opt
+    S1_opt = np.dot(S1_opt, R) + trans2
+    S2_opt = S2 * scale2 + trans2
+    
+    return S1_opt, S2_opt
+
+def plot_3d_pose(pose_gt, pose_pred, title_info):
     edges = [[0,1],[1,2],[2,3],[0,4],[4,5],[5,6],[0,7],[7,8],[8,9],
              [9,10],[8,11],[11,12],[12,13],[8,14],[14,15],[15,16]]
 
-    # ==========================================
-    # 【核心修正】：坐标系转换 (Camera -> Matplotlib)
-    # 真实数据集: X(左右), Y(上下, 下为正), Z(前后深度)
-    # Matplotlib: X(左右), Y(前后深度), Z(上下, 上为正)
-    # ==========================================
+    # 坐标系转换 (Camera -> Matplotlib)
     def convert_coords(pose):
         plot_pose = np.zeros_like(pose)
-        plot_pose[:, 0] = pose[:, 0]    # X 映射到 X
-        plot_pose[:, 1] = pose[:, 2]    # 相机深度 Z 映射到 画板深度 Y
-        plot_pose[:, 2] = -pose[:, 1]   # 相机高度 Y 翻转(让头朝上) 映射到 画板高度 Z
+        plot_pose[:, 0] = pose[:, 0]    
+        plot_pose[:, 1] = pose[:, 2]    
+        plot_pose[:, 2] = -pose[:, 1]   
         return plot_pose
 
-    # 在画图前先转换坐标！
     pose_gt_plot = convert_coords(pose_gt)
     pose_pred_plot = convert_coords(pose_pred)
 
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
     
-    # 绘制 Ground Truth (绿色)
     ax.scatter(pose_gt_plot[:, 0], pose_gt_plot[:, 1], pose_gt_plot[:, 2], c='green', s=40, label='Ground Truth')
     for i, j in edges:
         ax.plot([pose_gt_plot[i, 0], pose_gt_plot[j, 0]], 
                 [pose_gt_plot[i, 1], pose_gt_plot[j, 1]], 
                 [pose_gt_plot[i, 2], pose_gt_plot[j, 2]], c='green', alpha=0.6)
 
-    # 绘制 Prediction (红色)
     ax.scatter(pose_pred_plot[:, 0], pose_pred_plot[:, 1], pose_pred_plot[:, 2], c='red', s=40, marker='^', label='Prediction')
     for i, j in edges:
         ax.plot([pose_pred_plot[i, 0], pose_pred_plot[j, 0]], 
                 [pose_pred_plot[i, 1], pose_pred_plot[j, 1]], 
                 [pose_pred_plot[i, 2], pose_pred_plot[j, 2]], c='red', alpha=0.6, linestyle='--')
 
-    ax.set_title(f"3D Human Pose Estimation (MPJPE: {mpjpe_error:.2f} mm)", fontsize=14)
+    ax.set_title(title_info, fontsize=14)
     ax.set_xlabel('X (Right/Left)')
     ax.set_ylabel('Y (Depth)')
     ax.set_zlabel('Z (Up/Down)')
     
-    # 强制 1:1:1 绝对物理比例
     all_points = np.vstack([pose_gt_plot, pose_pred_plot])
     max_range = np.array([
         all_points[:, 0].max() - all_points[:, 0].min(),
@@ -117,81 +134,73 @@ def plot_3d_pose(pose_gt, pose_pred, mpjpe_error):
     ax.set_ylim(mid_y - max_range, mid_y + max_range)
     ax.set_zlim(mid_z - max_range, mid_z + max_range)
     
-    # 微调观察视角，让动作更立体
     ax.view_init(elev=15, azim=45)
-
     ax.legend()
     plt.tight_layout()
     plt.savefig('pose_visualization.png', dpi=300)
     print("✨ 可视化结果已保存为 'pose_visualization.png'")
 
 def main():
-    # ==========================
-    # 1. 路径设置 (请根据你需要测试的具体动作进行修改)
-    # ==========================
-    # 比如我们测试 E03 环境下，S01 用户的 A01 动作
-    sample_dir = "/home/a123456/SEA-/MMFi/E04/S31/A09"
+    sample_dir = "/home/a123456/SEA-/MMFi/E04/S34/A26"
     csi_dir = os.path.join(sample_dir, "wifi-csi")
     pose_path = os.path.join(sample_dir, "ground_truth.npy")
-    model_path = "sea_model.pth"
+    model_path = "sea_model.pth" 
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"[*] 使用设备: {device}")
 
-    # ==========================
-    # 2. 加载模型
-    # ==========================
     print("[*] 正在初始化并加载模型权重...")
     model = SEAplusplus(num_sensors=342, d_patch=11, d_model=128, num_branches=3, num_joints=17)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model = model.to(device)
     model.eval()
 
-    # ==========================
-    # 3. 加载并处理单条数据
-    # ==========================
     print(f"[*] 正在处理样本: {sample_dir} ...")
     if not os.path.exists(csi_dir) or not os.path.exists(pose_path):
-        print("❌ 错误: 找不到对应的 csi 目录或 ground_truth.npy 文件，请检查路径！")
+        print(" 错误: 找不到对应的数据！")
         return
 
     seq_amp, pose_gt = load_single_sample(csi_dir, pose_path)
     
-    # 转换为 Tensor，并增加 Batch 维度: [342, 297] -> [1, 342, 297]
     x_tensor = torch.from_numpy(seq_amp).unsqueeze(0).to(device)
-    y_tensor = torch.from_numpy(pose_gt).to(device)
 
-   # ==========================================
-    # 4. 模型推理与 Root-Relative (中心化) 对齐
-    # ==========================================
     print("[*] 正在进行 3D 姿态推理...")
     with torch.no_grad():
         pose_pred = model(x_tensor, train=False)
-        
-        # 将 Tensor 转回 Numpy
         pose_pred_np = pose_pred.squeeze(0).cpu().numpy()
-        pose_gt_np = pose_gt
         
-        # 【核心修正】：Root-Relative 对齐
-        # Human3.6M 标准中，索引 0 是根节点 (Pelvis)
-        root_gt = pose_gt_np[0]
-        root_pred = pose_pred_np[0]
+        # ==========================================
+        # 计算单样本四大 SOTA 指标
+        # ==========================================
+        # 0. 获取根节点对齐的相对坐标
+        pred_rel = pose_pred_np - pose_pred_np[0]
+        gt_rel = pose_gt - pose_gt[0]
         
-        # 全身坐标减去各自的根节点坐标，将两副骨架强行拉到 (0,0,0) 原点重合
-        pose_gt_rel = pose_gt_np - root_gt
-        pose_pred_rel = pose_pred_np - root_pred
+        # 1. MPJPE (相对姿态误差)
+        distances_rel = np.linalg.norm(pred_rel - gt_rel, axis=-1)
+        mpjpe = np.mean(distances_rel) * 1000
         
-        # 使用中心化后的相对坐标，计算真正的姿态误差 (PA-MPJPE)
-        distances = np.linalg.norm(pose_pred_rel - pose_gt_rel, axis=-1)
-        mpjpe_error_mm = np.mean(distances) * 1000
+        # 2. PA-MPJPE (普氏对齐误差)
+        pred_opt, gt_opt = compute_similarity_transform(pred_rel, gt_rel)
+        pa_distances = np.linalg.norm(pred_opt - gt_opt, axis=-1)
+        pa_mpjpe = np.mean(pa_distances) * 1000
+        
+        # 3 & 4. PCK@20 & PCK@50
+        pck_20 = np.mean(distances_rel < 0.02) * 100
+        pck_50 = np.mean(distances_rel < 0.05) * 100
 
-    print(f"🎯 消除绝对位置干扰后，真实的姿态 MPJPE 误差为: {mpjpe_error_mm:.2f} 毫米")
+    print("\n" + "="*45)
+    print(f"  单样本 ({sample_dir.split('/')[-1]}) 测试结果:")
+    print("-" * 45)
+    print(f" 1. PA-MPJPE (绝对极小误差) : {pa_mpjpe:.2f} mm")
+    print(f" 2. MPJPE    (相对姿态误差) : {mpjpe:.2f} mm")
+    print(f" 3. PCK@50   (<50mm 比例)   : {pck_50:.2f} %")
+    print(f" 4. PCK@20   (<20mm 比例)   : {pck_20:.2f} %")
+    print("="*45 + "\n")
 
-    # ==========================================
-    # 5. 可视化
-    # ==========================================
-    # 注意：这里传给画图函数的是对齐后的相对坐标 (_rel)！
-    plot_3d_pose(pose_gt_rel, pose_pred_rel, mpjpe_error_mm)
+    # 画图时传入的是未经中心化篡改的绝对坐标，但在标题上展示相对姿态的 MPJPE 误差
+    title_info = f"3D Pose | MPJPE: {mpjpe:.1f}mm | PA-MPJPE: {pa_mpjpe:.1f}mm"
+    plot_3d_pose(pose_gt, pose_pred_np, title_info)
 
 if __name__ == "__main__":
     main()
