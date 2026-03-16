@@ -79,29 +79,25 @@ class MMFiDataset(Dataset):
                                 pad_width = ((0, 0), (0, L_target - L_current))
                                 seq_amp = np.pad(seq_amp, pad_width, mode='constant', constant_values=0)
                             
-                            # ==========================================
-                            # 【核心防爆机制】：数据极值清理与归一化
-                            # ==========================================
-                            # 1. 终极清洗：将所有的 NaN 和 Inf(无穷大) 全部强制转换为 0
+                            # 1. 终极清洗：将所有的 NaN 和 Inf 全部强制转换为 0
                             seq_amp = np.nan_to_num(seq_amp, nan=0.0, posinf=0.0, neginf=0.0)
                             pose = np.nan_to_num(pose, nan=0.0, posinf=0.0, neginf=0.0)
                             
                             # 2. 强制转换为 float32 防止后续运算精度溢出
                             seq_amp = seq_amp.astype(np.float32)
                                 
-                            # 3. Z-score 归一化
-                            seq_amp = (seq_amp - np.mean(seq_amp)) / (np.std(seq_amp) + 1e-5)
+                            # ==========================================
+                            # 【核心物理修复】：使用全局缩放，完美保留距离衰减特性
+                            # ==========================================
+                            seq_amp = np.log1p(seq_amp) / 3.0
                             
-                            # 4. 最后一道保险：如果归一化后依然不干净，丢弃
+                            # 最后一道保险：如果依然不干净，丢弃
                             if not np.isfinite(seq_amp).all() or not np.isfinite(pose).all():
                                 continue
                             
-                            # 5. 【修复点】确保干净的数据被装入列表！
                             env_samples.append((seq_amp, pose))
                             
-            # ==========================================
-            # 【修复点】：UDA 跨环境任务，不再内部切分 80/20，保留 100% 完整环境数据
-            # ==========================================
+            # UDA 跨环境任务，不再内部切分 80/20，保留 100% 完整环境数据
             self.samples.extend(env_samples)
 
     def __len__(self):

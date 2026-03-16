@@ -6,12 +6,10 @@ from data_loader import get_loaders
 import argparse
 import itertools
 
-# Human3.6M 连线标准
 EDGES = [(0,1), (1,2), (2,3), (0,4), (4,5), (5,6), (0,7), (7,8), (8,9),
          (9,10), (8,11), (11,12), (12,13), (8,14), (14,15), (15,16)]
 
 def bone_length_loss(pred, gt):
-    """计算预测骨骼长度与真实骨骼长度的误差"""
     loss = 0
     for u, v in EDGES:
         pred_len = torch.norm(pred[:, u, :] - pred[:, v, :], dim=-1)
@@ -57,25 +55,18 @@ if __name__ == "__main__":
             optimizer.zero_grad()
             poses_s, align_loss = model(x_s, x_t, train=True)
             
-            # 1. 整体姿态损失
             sup_loss = criterion(poses_s, y_s)
-            
-            # 2. 骨骼长度损失 (物理限制)
             b_loss = bone_length_loss(poses_s, y_s) 
             
-            # 3. 根节点绝对定位损失 (死盯宏观定位)
+            # 【绝对定位防线】：使用 L2 距离算损失，让误差越大的地方被惩罚得越狠
             root_pred = poses_s[:, 0, :]
             root_gt = y_s[:, 0, :]
             root_loss = torch.mean(torch.norm(root_pred - root_gt, dim=-1))
             
-            # ==========================================
-            # 【核心改进】：UDA 动态对齐权重 (Curriculum Learning)
-            # 前 50 epoch 完全不考虑跨房间对齐，让模型疯狂记住绝对位置
-            # 50 epoch 之后，慢慢加入对齐，防止负迁移
-            # ==========================================
             alpha = max(0.0, min(1.0, (epoch - 50) / 100.0))
             
-            total_loss = sup_loss + 0.5 * b_loss + 2.0 * root_loss + alpha * align_loss
+            # 5.0 的超级权重，优先级压倒一切！
+            total_loss = sup_loss + 0.5 * b_loss + 5.0 * root_loss + alpha * align_loss
             
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)

@@ -120,7 +120,7 @@ class SimpleGCN(nn.Module):
         return F.relu(self.W(x))
 
 class PoseDecoder(nn.Module):
-    def __init__(self, num_joints=17, d_model=128):
+    def __init__(self, num_joints=17, d_model=128, num_sensors=342):
         super(PoseDecoder, self).__init__()
         self.mlp = nn.Linear(d_model, d_model)
         self.joint_embedding = nn.Parameter(torch.randn(1, num_joints, d_model))
@@ -129,47 +129,55 @@ class PoseDecoder(nn.Module):
         encoder_layer = nn.TransformerEncoderLayer(d_model, nhead=4, batch_first=True)
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
         
-        # ==========================================
-        # 【核心改进】：双分支解耦架构
-        # ==========================================
-        # 分支 A：专门预测根节点(跨部)的绝对物理坐标 [1, 3]
+        # 空间三角池化层：提炼 342 个传感器之间的空间差异
+        self.spatial_triangulation = nn.Sequential(
+            nn.Linear(num_sensors, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
+        )
+        
         self.root_regressor = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.LayerNorm(d_model),
+            nn.ReLU(),
             nn.Linear(d_model, 64),
             nn.ReLU(),
             nn.Linear(64, 3)
         )
         
-        # 分支 B：专门预测 17 个关节的纯相对动作姿态 [17, 3]
         self.pose_fc = nn.Linear(d_model, 3)
 
     def forward(self, Z):
-        # 提取全局特征
+        # ------------------------------------------
+        # 分支 A：根节点绝对位置 (保留空间天线差异！)
+        # ------------------------------------------
+        # Z 的维度: [B, hat_L=27, N=342, d_model=128]
+        # 平均掉时间轴 (dim=1)
+        Z_time_avg = Z.mean(dim=1) # [B, 342, 128]
+        Z_time_avg_T = Z_time_avg.permute(0, 2, 1) # [B, 128, 342]
+        
+        Z_root = self.spatial_triangulation(Z_time_avg_T).squeeze(-1) 
+        root_abs = self.root_regressor(Z_root).unsqueeze(1) # [B, 1, 3]
+        
+        # ------------------------------------------
+        # 分支 B：相对微观动作
+        # ------------------------------------------
         Z_agg = Z.mean(dim=1)  
-        Z_global = self.mlp(Z_agg.mean(dim=1)) # [B, d_model]
+        Z_global = self.mlp(Z_agg.mean(dim=1)) 
         
-        # ------------------------------------------
-        # 1. 根节点绝对位置预测 (Root Absolute)
-        # ------------------------------------------
-        root_abs = self.root_regressor(Z_global).unsqueeze(1) # [B, 1, 3]
-        
-        # ------------------------------------------
-        # 2. 相对微观动作预测 (Pose Relative)
-        # ------------------------------------------
         Z_joints = Z_global.unsqueeze(1).repeat(1, 17, 1)
         Z_joints = Z_joints + self.joint_embedding
         
         Z_joints_gcn = self.gcn(Z_joints)
         Z_trans = self.transformer(Z_joints_gcn)
-        pose_rel = self.pose_fc(Z_trans) # [B, 17, 3]
+        pose_rel = self.pose_fc(Z_trans) 
         
-        # 【强制中心化】：剥离相对姿态中的杂乱平移，强制它的根节点为 (0,0,0)
         pose_rel = pose_rel - pose_rel[:, 0:1, :]
         
         # ------------------------------------------
-        # 3. 终极融合：绝对坐标 = 相对动作 + 绝对原点
+        # 终极融合
         # ------------------------------------------
         poses = pose_rel + root_abs
-        
         return poses
 
 class SEAplusplus(nn.Module):
@@ -179,9 +187,8 @@ class SEAplusplus(nn.Module):
         self.feature_proj = nn.Linear(d_patch, d_model) 
         self.encoder = GraphEncoder(num_sensors, d_model, num_branches)
         
-        # 权重设为 0.01，配合外部的动态对齐
         self.alignment = Alignment(lambda_sca=0.01, lambda_sfa=0.01)
-        self.decoder = PoseDecoder(num_joints, d_model)
+        self.decoder = PoseDecoder(num_joints, d_model, num_sensors) 
 
     def forward(self, x_s, x_t=None, train=True):
         B, N, L = x_s.shape

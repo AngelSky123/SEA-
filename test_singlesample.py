@@ -8,14 +8,12 @@ from mpl_toolkits.mplot3d import Axes3D
 from model import SEAplusplus
 
 def load_single_sample(csi_dir, pose_path, L=297):
-    # 1. 加载真实的 3D Pose
     pose_array = np.load(pose_path)
     if pose_array.ndim == 3: 
         pose_gt = np.mean(pose_array, axis=0)
     else:
         pose_gt = pose_array
 
-    # 2. 加载 CSI 序列
     csi_files = sorted([f for f in os.listdir(csi_dir) if f.endswith('.mat')])
     sequence_frames = []
     
@@ -37,7 +35,6 @@ def load_single_sample(csi_dir, pose_path, L=297):
         
     seq_amp = np.stack(sequence_frames, axis=1) 
     
-    # 3. 长度对齐
     L_current = seq_amp.shape[1]
     if L_current > L:
         seq_amp = seq_amp[:, :L]
@@ -45,50 +42,19 @@ def load_single_sample(csi_dir, pose_path, L=297):
         pad_width = ((0, 0), (0, L - L_current))
         seq_amp = np.pad(seq_amp, pad_width, mode='constant', constant_values=0)
         
-    # 4. 数据清洗与 Z-score 归一化
     seq_amp = np.nan_to_num(seq_amp, nan=0.0, posinf=0.0, neginf=0.0)
     pose_gt = np.nan_to_num(pose_gt, nan=0.0, posinf=0.0, neginf=0.0)
     
     seq_amp = seq_amp.astype(np.float32)
-    seq_amp = (seq_amp - np.mean(seq_amp)) / (np.std(seq_amp) + 1e-5)
+    # 【与训练完全对齐】：抛弃 Z-score，采用物理级压缩
+    seq_amp = np.log1p(seq_amp) / 3.0
     
     return seq_amp, pose_gt
-
-def compute_similarity_transform(S1, S2):
-    """普氏分析 (Procrustes Analysis) 核心算法"""
-    trans1 = S1.mean(axis=0)
-    trans2 = S2.mean(axis=0)
-    S1 = S1 - trans1
-    S2 = S2 - trans2
-    scale1 = np.linalg.norm(S1)
-    scale2 = np.linalg.norm(S2)
-    
-    if scale1 == 0 or scale2 == 0:
-        return S1, S2
-        
-    S1 = S1 / scale1
-    S2 = S2 / scale2
-    
-    U, s, Vh = np.linalg.svd(np.dot(S1.T, S2))
-    R = np.dot(U, Vh)
-    
-    if np.linalg.det(R) < 0:
-        Vh[-1] *= -1
-        s[-1] *= -1
-        R = np.dot(U, Vh)
-        
-    s_opt = sum(s) * (scale2 / scale1)
-    S1_opt = S1 * scale1 * s_opt
-    S1_opt = np.dot(S1_opt, R) + trans2
-    S2_opt = S2 * scale2 + trans2
-    
-    return S1_opt, S2_opt
 
 def plot_3d_pose(pose_gt, pose_pred, title_info):
     edges = [[0,1],[1,2],[2,3],[0,4],[4,5],[5,6],[0,7],[7,8],[8,9],
              [9,10],[8,11],[11,12],[12,13],[8,14],[14,15],[15,16]]
 
-    # 坐标系转换 (Camera -> Matplotlib)
     def convert_coords(pose):
         plot_pose = np.zeros_like(pose)
         plot_pose[:, 0] = pose[:, 0]    
@@ -141,7 +107,7 @@ def plot_3d_pose(pose_gt, pose_pred, title_info):
     print("✨ 可视化结果已保存为 'pose_visualization.png'")
 
 def main():
-    sample_dir = "/home/a123456/SEA-/MMFi/E04/S34/A26"
+    sample_dir = "/home/a123456/SEA-/MMFi/E04/S31/A12"
     csi_dir = os.path.join(sample_dir, "wifi-csi")
     pose_path = os.path.join(sample_dir, "ground_truth.npy")
     model_path = "sea_model.pth" 
@@ -155,13 +121,7 @@ def main():
     model = model.to(device)
     model.eval()
 
-    print(f"[*] 正在处理样本: {sample_dir} ...")
-    if not os.path.exists(csi_dir) or not os.path.exists(pose_path):
-        print(" 错误: 找不到对应的数据！")
-        return
-
     seq_amp, pose_gt = load_single_sample(csi_dir, pose_path)
-    
     x_tensor = torch.from_numpy(seq_amp).unsqueeze(0).to(device)
 
     print("[*] 正在进行 3D 姿态推理...")
@@ -169,37 +129,21 @@ def main():
         pose_pred = model(x_tensor, train=False)
         pose_pred_np = pose_pred.squeeze(0).cpu().numpy()
         
-        # ==========================================
-        # 计算单样本四大 SOTA 指标
-        # ==========================================
-        # 0. 获取根节点对齐的相对坐标
-        pred_rel = pose_pred_np - pose_pred_np[0]
-        gt_rel = pose_gt - pose_gt[0]
-        
-        # 1. MPJPE (相对姿态误差)
-        distances_rel = np.linalg.norm(pred_rel - gt_rel, axis=-1)
-        mpjpe = np.mean(distances_rel) * 1000
-        
-        # 2. PA-MPJPE (普氏对齐误差)
-        pred_opt, gt_opt = compute_similarity_transform(pred_rel, gt_rel)
-        pa_distances = np.linalg.norm(pred_opt - gt_opt, axis=-1)
-        pa_mpjpe = np.mean(pa_distances) * 1000
-        
-        # 3 & 4. PCK@20 & PCK@50
-        pck_20 = np.mean(distances_rel < 0.02) * 100
-        pck_50 = np.mean(distances_rel < 0.05) * 100
+        # 抛弃一切对齐，严格计算原始物理空间误差！
+        distances_abs = np.linalg.norm(pose_pred_np - pose_gt, axis=-1)
+        mpjpe_abs = np.mean(distances_abs) * 1000
+        pck_50_abs = np.mean(distances_abs < 0.05) * 100
+        pck_20_abs = np.mean(distances_abs < 0.02) * 100
 
     print("\n" + "="*45)
-    print(f"  单样本 ({sample_dir.split('/')[-1]}) 测试结果:")
+    print(f" 🎯 单样本 ({sample_dir.split('/')[-1]}) 真实物理空间测试结果:")
     print("-" * 45)
-    print(f" 1. PA-MPJPE (绝对极小误差) : {pa_mpjpe:.2f} mm")
-    print(f" 2. MPJPE    (相对姿态误差) : {mpjpe:.2f} mm")
-    print(f" 3. PCK@50   (<50mm 比例)   : {pck_50:.2f} %")
-    print(f" 4. PCK@20   (<20mm 比例)   : {pck_20:.2f} %")
+    print(f" 1. 绝对 MPJPE (最严格真实误差): {mpjpe_abs:.2f} mm")
+    print(f" 2. 绝对 PCK@50 (<50mm 准确率) : {pck_50_abs:.2f} %")
+    print(f" 3. 绝对 PCK@20 (<20mm 准确率) : {pck_20_abs:.2f} %")
     print("="*45 + "\n")
 
-    # 画图时传入的是未经中心化篡改的绝对坐标，但在标题上展示相对姿态的 MPJPE 误差
-    title_info = f"3D Pose | MPJPE: {mpjpe:.1f}mm | PA-MPJPE: {pa_mpjpe:.1f}mm"
+    title_info = f"Absolute 3D Pose | Raw MPJPE: {mpjpe_abs:.1f}mm"
     plot_3d_pose(pose_gt, pose_pred_np, title_info)
 
 if __name__ == "__main__":
