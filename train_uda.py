@@ -58,14 +58,16 @@ if __name__ == "__main__":
             sup_loss = criterion(poses_s, y_s)
             b_loss = bone_length_loss(poses_s, y_s) 
             
-            # 【绝对定位防线】：使用 L2 距离算损失，让误差越大的地方被惩罚得越狠
             root_pred = poses_s[:, 0, :]
             root_gt = y_s[:, 0, :]
             root_loss = torch.mean(torch.norm(root_pred - root_gt, dim=-1))
             
-            alpha = max(0.0, min(1.0, (epoch - 50) / 100.0))
+            # ==========================================
+            # 🛡️ 保护机制：延迟对齐，且最高权重压制在 0.3
+            # 防止 E04 的杂波在后期把精准的绝对坐标拉偏！
+            # ==========================================
+            alpha = max(0.0, min(0.3, (epoch - 100) / 100.0))
             
-            # 5.0 的超级权重，优先级压倒一切！
             total_loss = sup_loss + 0.5 * b_loss + 5.0 * root_loss + alpha * align_loss
             
             total_loss.backward()

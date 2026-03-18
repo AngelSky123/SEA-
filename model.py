@@ -123,60 +123,59 @@ class PoseDecoder(nn.Module):
     def __init__(self, num_joints=17, d_model=128, num_sensors=342):
         super(PoseDecoder, self).__init__()
         self.mlp = nn.Linear(d_model, d_model)
-        self.joint_embedding = nn.Parameter(torch.randn(1, num_joints, d_model))
         
+        self.pose_prompt = nn.Parameter(torch.zeros(1, num_joints, d_model))
+        nn.init.normal_(self.pose_prompt, std=0.02) 
+        
+        # ==========================================
+        # 🎯 终极杀招：真实物理平均坐标作为绝对原点起跑线！
+        # ==========================================
+        self.root_prompt = nn.Parameter(torch.tensor([[-0.0352, 0.0206, 3.1340]]))
+
         self.gcn = SimpleGCN(d_model)
-        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead=4, batch_first=True)
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
         
-        # 空间三角池化层：提炼 342 个传感器之间的空间差异
+        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead=4, batch_first=True, activation='gelu')
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=3) 
+        
         self.spatial_triangulation = nn.Sequential(
             nn.Linear(num_sensors, 64),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(64, 1)
         )
         
         self.root_regressor = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.LayerNorm(d_model),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(d_model, 64),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(64, 3)
         )
         
         self.pose_fc = nn.Linear(d_model, 3)
 
     def forward(self, Z):
-        # ------------------------------------------
-        # 分支 A：根节点绝对位置 (保留空间天线差异！)
-        # ------------------------------------------
-        # Z 的维度: [B, hat_L=27, N=342, d_model=128]
-        # 平均掉时间轴 (dim=1)
-        Z_time_avg = Z.mean(dim=1) # [B, 342, 128]
-        Z_time_avg_T = Z_time_avg.permute(0, 2, 1) # [B, 128, 342]
-        
+        # 1. 宏观绝对坐标分支
+        Z_time_avg = Z.mean(dim=1) 
+        Z_time_avg_T = Z_time_avg.permute(0, 2, 1) 
         Z_root = self.spatial_triangulation(Z_time_avg_T).squeeze(-1) 
-        root_abs = self.root_regressor(Z_root).unsqueeze(1) # [B, 1, 3]
         
-        # ------------------------------------------
-        # 分支 B：相对微观动作
-        # ------------------------------------------
+        # 站在 3.13 米的巨人肩膀上预测极小偏移量
+        root_offset = self.root_regressor(Z_root).unsqueeze(1) 
+        root_abs = self.root_prompt + root_offset 
+        
+        # 2. 微观相对姿态分支
         Z_agg = Z.mean(dim=1)  
         Z_global = self.mlp(Z_agg.mean(dim=1)) 
-        
         Z_joints = Z_global.unsqueeze(1).repeat(1, 17, 1)
-        Z_joints = Z_joints + self.joint_embedding
+        Z_joints = Z_joints + self.pose_prompt
         
         Z_joints_gcn = self.gcn(Z_joints)
         Z_trans = self.transformer(Z_joints_gcn)
         pose_rel = self.pose_fc(Z_trans) 
-        
         pose_rel = pose_rel - pose_rel[:, 0:1, :]
         
-        # ------------------------------------------
-        # 终极融合
-        # ------------------------------------------
+        # 3. 终极融合
         poses = pose_rel + root_abs
         return poses
 
@@ -186,7 +185,6 @@ class SEAplusplus(nn.Module):
         self.d_patch = d_patch
         self.feature_proj = nn.Linear(d_patch, d_model) 
         self.encoder = GraphEncoder(num_sensors, d_model, num_branches)
-        
         self.alignment = Alignment(lambda_sca=0.01, lambda_sfa=0.01)
         self.decoder = PoseDecoder(num_joints, d_model, num_sensors) 
 
