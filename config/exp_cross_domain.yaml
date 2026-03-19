@@ -1,0 +1,7 @@
+domain:
+  source: [E01, E02, E03]
+  target: [E04]
+
+train:
+  epochs: 100
+  batch_size: 8
