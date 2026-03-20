@@ -3,6 +3,7 @@ from torch.utils.data import DataLoader
 import os
 import time
 import yaml
+import itertools  # ⬆ 新增导入 itertools
 
 from dataset.mmfi_dataset import MMFiDataset
 from models.model import WiFiPoseModel
@@ -82,7 +83,14 @@ def main():
     for epoch in range(start_epoch, cfg.train.epochs):
         model.train()
 
-        for i, ((xs, ys), (xt, _)) in enumerate(zip(source_loader, target_loader)):
+        #  核心修复：将较短的目标域 DataLoader 转为无限循环迭代器
+        target_iter = itertools.cycle(target_loader)
+
+        #  核心修复：以数据量更大的源域 source_loader 为主循环
+        for i, (xs, ys) in enumerate(source_loader):
+            
+            # 从目标域迭代器中获取一个 batch
+            xt, _ = next(target_iter)
 
             xs = xs.to(device, non_blocking=True)
             ys = ys.to(device, non_blocking=True)
@@ -95,7 +103,7 @@ def main():
 
             # ===== NaN保护 =====
             if torch.isnan(loss) or torch.isinf(loss):
-                print("⚠️ NaN/Inf loss, skip batch")
+                print(" NaN/Inf loss, skip batch")
                 continue
 
             optimizer.zero_grad()
@@ -130,7 +138,7 @@ def main():
 
         print(f" Epoch {epoch} Done")
 
-    print("🚀 Training Finished")
+    print(" Training Finished")
 
 
 if __name__ == "__main__":

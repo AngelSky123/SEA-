@@ -11,15 +11,27 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--env', default='E01')
-    parser.add_argument('--subject', default='S01')
+    parser.add_argument('--env', default='E04')
+    parser.add_argument('--subject', default='S35')
     parser.add_argument('--action', default='A01')
-    args = parser.parse_args()
+    #  替换为 --work：专门用于指定测试权重路径
+    parser.add_argument('--work', required=True, help="模型权重的路径")
+    
+    # 兼容可能传入的 --config 等其他未定义参数，防止报错
+    args, _ = parser.parse_known_args()
 
     dataset = MMFiDataset(config.DATA_ROOT, [args.env])
 
     model = WiFiPoseModel().to(device)
-    model.load_state_dict(torch.load("model.pth"))
+    
+    #  使用 args.work 读取路径
+    if args.work:
+        checkpoint = torch.load(args.work, map_location=device)
+        model.load_state_dict(checkpoint['model'])
+        print(f" 成功加载权重: {args.work}")
+    else:
+        raise ValueError(" 请通过 --work 参数指定测试模型的权重路径！")
+        
     model.eval()
 
     print(f"Testing {args.env}-{args.subject}-{args.action}")
@@ -47,7 +59,7 @@ def main():
         )
 
         print(" Visualization saved: single_pose.png")
-        break
+        break # 测完第一个就退出
 
 if __name__ == "__main__":
     main()

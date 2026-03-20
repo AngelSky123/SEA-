@@ -4,7 +4,7 @@ from .attention import CrossSensorAttention
 from .transformer import TemporalTransformer
 
 class Encoder(nn.Module):
-    def __init__(self, in_dim=4, dim=64):  # 👈 改这里
+    def __init__(self, in_dim=4, dim=64):  #  改这里
         super().__init__()
         self.gat = GATLayer(in_dim, dim)
         self.attn = CrossSensorAttention(dim)
