@@ -3,7 +3,7 @@ from torch.utils.data import DataLoader
 import os
 import time
 import yaml
-import itertools  # ⬆ 新增导入 itertools
+import itertools
 
 from dataset.mmfi_dataset import MMFiDataset
 from models.model import WiFiPoseModel
@@ -11,132 +11,121 @@ from losses.losses import compute_loss
 from utils.config import get_config
 from utils.checkpoint import save_checkpoint, load_checkpoint
 
-# ===== GPU优化 =====
 torch.backends.cudnn.benchmark = True
-
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# ===== AMP =====
 from torch.cuda.amp import autocast, GradScaler
 scaler = GradScaler()
+
+
+def get_grl_alpha(epoch, total_epochs, max_alpha=1.0):
+    p = epoch / max(total_epochs - 1, 1)
+    return max_alpha * p
 
 
 def main():
     cfg = get_config()
 
-    # ===== 创建实验目录 =====
     exp_name = time.strftime("%Y%m%d_%H%M%S")
     save_dir = os.path.join(cfg.log.save_dir, exp_name)
     os.makedirs(save_dir, exist_ok=True)
 
-    # ===== 保存 config =====
     with open(os.path.join(save_dir, "config.yaml"), 'w') as f:
         yaml.dump(cfg.__dict__, f)
 
     print("===== CONFIG =====")
     print(cfg.__dict__)
 
-    # ===== Dataset =====
-    source_data = MMFiDataset(
-        cfg.data.root,
-        cfg.domain.source,
-        cfg.data.seq_len
-    )
+    cache_dir   = getattr(cfg.data, "cache_dir", None)
+    source_data = MMFiDataset(cfg.data.root, cfg.domain.source,
+                              cfg.data.seq_len, cache_dir=cache_dir)
+    target_data = MMFiDataset(cfg.data.root, cfg.domain.target,
+                              cfg.data.seq_len, cache_dir=cache_dir)
 
-    target_data = MMFiDataset(
-        cfg.data.root,
-        cfg.domain.target,
-        cfg.data.seq_len
-    )
+    source_loader = DataLoader(source_data, batch_size=cfg.train.batch_size,
+                               shuffle=True,  num_workers=8,
+                               pin_memory=True, drop_last=True)
+    target_loader = DataLoader(target_data, batch_size=cfg.train.batch_size,
+                               shuffle=True,  num_workers=8,
+                               pin_memory=True, drop_last=True)
 
-    # ===== DataLoader（高性能）=====
-    source_loader = DataLoader(
-        source_data,
-        batch_size=cfg.train.batch_size,
-        shuffle=True,
-        num_workers=8,
-        pin_memory=True,
-        drop_last=True
-    )
-
-    target_loader = DataLoader(
-        target_data,
-        batch_size=cfg.train.batch_size,
-        shuffle=True,
-        num_workers=8,
-        pin_memory=True,
-        drop_last=True
-    )
-
-    # ===== Model =====
-    model = WiFiPoseModel().to(device)
+    model     = WiFiPoseModel(dim=cfg.model.dim).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.train.lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=cfg.train.epochs, eta_min=cfg.train.lr * 0.01)
 
-    # ===== Resume =====
     start_epoch = 0
     if cfg.resume:
-        model, optimizer, start_epoch = load_checkpoint(cfg.resume, model, optimizer)
+        model, optimizer, start_epoch = load_checkpoint(
+            cfg.resume, model, optimizer)
 
-    best_loss = 1e10
+    best_loss = float('inf')
 
-    # ===== Training =====
     for epoch in range(start_epoch, cfg.train.epochs):
         model.train()
-
-        #  核心修复：将较短的目标域 DataLoader 转为无限循环迭代器
+        alpha       = get_grl_alpha(epoch, cfg.train.epochs)
         target_iter = itertools.cycle(target_loader)
 
-        #  核心修复：以数据量更大的源域 source_loader 为主循环
-        for i, (xs, ys) in enumerate(source_loader):
-            
-            # 从目标域迭代器中获取一个 batch
-            xt, _ = next(target_iter)
+        epoch_loss_sum = 0.0
+        epoch_steps    = 0
+        loss_keys      = ["pose", "bone", "align", "domain", "orth"]
+        comp_sum       = {k: 0.0 for k in loss_keys}
+
+        for i, batch_s in enumerate(source_loader):
+            # 数据集返回三元组：(csi, pose_centered, root_offset)
+            xs, ys, _  = batch_s
+            xt, _, _   = next(target_iter)
 
             xs = xs.to(device, non_blocking=True)
             ys = ys.to(device, non_blocking=True)
             xt = xt.to(device, non_blocking=True)
 
-            # ===== Mixed Precision =====
-            with autocast():
-                pred, fs, ft, ds, dt = model(xs, xt)
-                loss = compute_loss(pred, ys, fs, ft, ds, dt)
-
-            # ===== NaN保护 =====
-            if torch.isnan(loss) or torch.isinf(loss):
-                print(" NaN/Inf loss, skip batch")
-                continue
-
             optimizer.zero_grad()
 
-            # ===== AMP backward =====
+            with autocast():
+                pose, fs, ft, ds, dt, orth_loss = model(xs, xt, alpha=alpha)
+                loss, components = compute_loss(
+                    pose, ys, fs, ft, ds, dt, orth_loss)
+
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"  [Epoch {epoch}] NaN/Inf at iter {i}, skip")
+                continue
+
             scaler.scale(loss).backward()
-
-            # ===== 梯度裁剪 =====
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
             scaler.step(optimizer)
             scaler.update()
 
-            # ===== Log =====
+            epoch_loss_sum += loss.item()
+            epoch_steps    += 1
+            for k in loss_keys:
+                comp_sum[k] += components.get(k, 0.0)
+
             if i % cfg.log.print_freq == 0:
-                print(f"[Epoch {epoch}] Iter {i} Loss {loss.item():.4f}")
+                parts = " ".join(
+                    f"{k}={components.get(k,0):.4f}" for k in loss_keys)
+                print(f"[Epoch {epoch:03d}][{i:04d}/{len(source_loader)}] "
+                      f"loss={loss.item():.4f}  {parts}  alpha={alpha:.3f}")
 
-        # ===== 保存checkpoint =====
-        state = {
-            'model': model.state_dict(),
-            'optimizer': optimizer.state_dict(),
-            'epoch': epoch,
-        }
+        scheduler.step()
 
+        if epoch_steps == 0:
+            continue
+
+        epoch_avg = epoch_loss_sum / epoch_steps
+        parts = " | ".join(
+            f"{k}={comp_sum[k]/epoch_steps:.4f}" for k in loss_keys)
+        print(f" Epoch {epoch:03d} done | avg={epoch_avg:.4f} | {parts}")
+
+        state = {'model': model.state_dict(),
+                 'optimizer': optimizer.state_dict(),
+                 'epoch': epoch, 'loss': epoch_avg}
         save_checkpoint(state, save_dir, "latest.pth")
-        save_checkpoint(state, save_dir, f"epoch_{epoch}.pth")
 
-        # ===== best model =====
-        if loss.item() < best_loss:
-            best_loss = loss.item()
+        if epoch_avg < best_loss:
+            best_loss = epoch_avg
             save_checkpoint(state, save_dir, "best.pth")
-
-        print(f" Epoch {epoch} Done")
+            print(f"  → new best: {best_loss:.4f}")
 
     print(" Training Finished")
 
