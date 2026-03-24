@@ -9,7 +9,7 @@ train:
   lr: 0.0001
 
 model:
-  dim: 128
+  dim: 256
   num_joints: 17
 
 domain:

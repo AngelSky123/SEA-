@@ -41,10 +41,10 @@ def main():
                               cfg.data.seq_len, cache_dir=cache_dir)
 
     source_loader = DataLoader(source_data, batch_size=cfg.train.batch_size,
-                               shuffle=True, num_workers=8,
+                               shuffle=True, num_workers=24,
                                pin_memory=True, drop_last=True)
     target_loader = DataLoader(target_data, batch_size=cfg.train.batch_size,
-                               shuffle=True, num_workers=8,
+                               shuffle=True, num_workers=24,
                                pin_memory=True, drop_last=True)
 
     model = WiFiPoseModel(dim=cfg.model.dim,
