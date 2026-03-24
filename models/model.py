@@ -9,7 +9,7 @@ from .disentangle import DomainDisentangle
 class WiFiPoseModel(nn.Module):
     def __init__(self, dim=64, num_joints=17):
         super().__init__()
-        self.encoder     = Encoder(in_dim=4, dim=dim)
+        self.encoder     = Encoder(in_dim=40, dim=dim)
         self.disentangle = DomainDisentangle(dim)
         self.head        = PoseHead(dim, num_joints=num_joints)
         self.domain      = DomainDisc(dim, num_env=2)

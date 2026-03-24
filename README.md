@@ -31,7 +31,7 @@
 - **对抗域自适应**（GRL + 域判别器）：迫使编码器学习域不变的姿态语义特征
 - **特征解耦**（DomainDisentangle）：显式分离共享特征与域私有特征，正交损失进一步约束解耦质量
 - **跨传感器图注意力**（GAT + CrossSensorAttention）：建模天线间的空间依赖关系
-- **时序 Transformer**（含位置编码）：在时间维度上捕捉动作的连续性
+- **时序 Transformer**（含位置编码）：在时间维度上捕捉动作的连续性，每个天线节点独立建模
 
 ---
 
@@ -42,32 +42,38 @@ CSI Input (B, T, N, C)
         │
         ▼
 ┌───────────────────┐
-│  GATLayer          │  ← 空间传感器图注意力
+│  GATLayer          │  ← 空间传感器间图注意力
 │  CrossSensorAttn   │  ← 跨传感器自注意力
-│  TemporalTF + PE   │  ← 时序 Transformer（仅在 T 维度）
+│  TemporalTF + PE   │  ← 时序 Transformer（每个节点独立，保留节点多样性）
 └───────────────────┘
         │  Encoder Output (B, T, N, D)
         ▼
 ┌───────────────────┐
 │  DomainDisentangle │  → shared_feat  ──► PoseHead → 3D Pose (B, J, 3)
-│                    │  → private_feat ──► DomainDisc (with GRL)
+│                    │  → private_feat ──► (仅参与正交损失)
 └───────────────────┘
         │
-  Orthogonality Loss (shared ⊥ private)
+        ├── shared_feat ──► DomainDisc (with GRL) ──► 对抗域分类损失
+        └── Orthogonality Loss (shared ⊥ private)
 ```
+
+> **注意**：域判别器作用于 **shared** 特征（经 GRL 梯度反转），而非 private 特征。
+> 这是对抗域自适应的标准做法：GRL 迫使 encoder 让 shared 特征无法被域判别器区分，
+> 从而习得域不变表示。对 private 特征做域分类没有对抗意义。
 
 **损失函数：**
 
 ```
-L_total = L_pose + 0.1 × L_bone + 0.01 × L_align + 0.01 × L_domain + 0.01 × L_orth
+L_total = L_pose + 0.1 × L_vel + 0.1 × L_bone + 0.01 × L_align + 0.01 × L_domain + 0.01 × L_orth
 ```
 
 | 损失项 | 权重 | 说明 |
 |--------|------|------|
 | `L_pose` | 1.0 | MSE 姿态回归损失，对根节点中心化后的相对坐标监督 |
+| `L_vel` | 0.1 | 帧间位移监督（末帧 - 首帧），提供运动方向信号，权重较低避免喧宾夺主 |
 | `L_bone` | 0.1 | 骨骼长度一致性损失，约束预测骨架各骨骼长度与 GT 一致 |
-| `L_align` | 0.01 | 源/目标域共享特征均值 MSE 对齐 |
-| `L_domain` | 0.01 | 对抗域分类交叉熵（源域=0，目标域=1，经过 GRL） |
+| `L_align` | 0.01 | 源/目标域 shared 特征均值 MSE 对齐 |
+| `L_domain` | 0.01 | 对抗域分类交叉熵（源域=0，目标域=1，经过 GRL，作用于 shared 特征） |
 | `L_orth` | 0.01 | shared / private 特征正交约束 |
 
 ---
@@ -82,24 +88,25 @@ L_total = L_pose + 0.1 × L_bone + 0.01 × L_align + 0.01 × L_domain + 0.01 × 
 ├── dataset/
 │   └── mmfi_dataset.py         # MMFi 数据集加载（CSI 预处理、根节点中心化、预处理缓存）
 ├── losses/
-│   └── losses.py               # 联合损失函数（pose + bone + align + domain + orth）
+│   └── losses.py               # 联合损失函数（pose + vel + bone + align + domain + orth）
 ├── models/
 │   ├── attention.py            # CrossSensorAttention（注意力权重缓存）
 │   ├── disentangle.py          # DomainDisentangle（shared/private 特征分离）
-│   ├── domain_disc.py          # 域判别器（内置 GRL）
+│   ├── domain_disc.py          # 域判别器（内置 GRL，作用于 shared 特征）
 │   ├── encoder.py              # 三阶段编码器（GAT + Attn + Transformer）
 │   ├── gat.py                  # 图注意力层
 │   ├── grad_reverse.py         # 梯度反转层（GRL）
 │   ├── model.py                # WiFiPoseModel 主模型
 │   ├── pose_head.py            # 姿态回归头
-│   └── transformer.py          # TemporalTransformer（含正弦位置编码）
+│   └── transformer.py          # TemporalTransformer（含正弦位置编码，节点独立建模）
 ├── utils/
-│   ├── checkpoint.py           # checkpoint 保存与加载（支持新旧结构部分复用）
+│   ├── checkpoint.py           # checkpoint 保存与加载（strict=False，详细加载报告）
 │   └── config.py               # YAML + 命令行参数合并
 ├── visualization/
 │   ├── attention_vis.py        # 传感器注意力热力图与统计
 │   ├── experiment_report.py    # 多实验对比报告
 │   ├── joint_error_analysis.py # 逐关节误差 / 雷达图 / 骨架热力图
+│   ├── plot_loss.py            # 简易损失曲线（服务器友好，savefig 接口）
 │   ├── plot_training_curves.py # 训练曲线可视化
 │   ├── pose_vis.py             # 3D 姿态对比 / 序列 / 误差向量场
 │   └── tsne_analysis.py        # t-SNE 域对齐分析
@@ -123,7 +130,7 @@ pip install scikit-learn               # t-SNE / silhouette score
 pip install pyyaml tqdm                # tqdm 用于缓存构建进度显示
 ```
 
-**GPU 建议：** 训练需要至少 12GB 显存（batch_size=32，dim=64）。batch_size=64 需要 16GB 以上（如 RTX 4080）。
+**GPU 建议：** 训练需要至少 16GB 显存（batch_size=64，dim=256）。如显存不足可降低 batch_size 或 dim。
 
 验证安装：
 
@@ -247,8 +254,8 @@ outputs/
 **训练日志示例：**
 
 ```
-[Epoch 010][0020/3505] loss=0.0312  pose=0.0198  bone=0.0087  align=0.0003  domain=1.3821  orth=0.0000  alpha=0.200
- Epoch 010 done | avg=0.0301 | pose=0.0192 | bone=0.0083 | align=0.0003 | domain=1.3756 | orth=0.0000
+[Epoch 010][0020/3505] loss=0.0312  pose=0.0198  vel=0.0041  bone=0.0087  align=0.0003  domain=1.3821  orth=0.0000  alpha=0.200
+ Epoch 010 done | avg=0.0301 | pose=0.0192 | vel=0.0038 | bone=0.0083 | align=0.0003 | domain=1.3756 | orth=0.0000
   → new best: 0.0301
 ```
 
@@ -355,12 +362,12 @@ data:
                              # 首次运行自动构建，后续直接读 .npy，GPU 利用率从 <5% 提升至 70%+
 
 train:
-  batch_size: 32             # 每批样本数（RTX 4080 16GB 建议 32~64）
+  batch_size: 64             # 每批样本数（16GB 显存建议 64，dim=256）
   epochs: 50                 # 训练总轮数
   lr: 0.0001                 # Adam 初始学习率（Cosine 衰减至 1e-6）
 
 model:
-  dim: 64                    # 编码器隐层维度（GAT / Transformer / PoseHead 统一）
+  dim: 256                   # 编码器隐层维度（GAT / Transformer / PoseHead 统一）
   num_joints: 17             # 骨架关节数（H36M 标准）
 
 domain:
@@ -395,12 +402,37 @@ log:
 
 ## 更新日志
 
-**v2（当前版本）**
-- `mmfi_dataset.py`：新增**根节点中心化**，将绝对世界坐标转换为以 Hip 为原点的相对坐标，解决 MPJPE 与 PA-MPJPE 差距过大的全局位置偏移问题
-- `mmfi_dataset.py`：新增**预处理缓存**（`cache_dir`），消除 CPU IO 瓶颈，GPU 利用率从 <5% 提升至 70%+
-- `losses.py`：新增**骨骼长度一致性损失**（`L_bone`），约束预测骨架的结构合理性
-- `utils/checkpoint.py`：支持**部分权重复用**（`strict=False`），新旧模型结构不匹配时不报错，打印详细加载报告
-- `test_single.py` / `test_cross_domain.py`：测试脚本加载权重统一改为 `--work` 参数，`--resume` 仅保留在 `train.py` 用于中断恢复
+**v3（当前版本）**
+
+> 本次更新修复了 v2 中存在的若干 critical bug 及设计问题，建议所有用户更新。
+
+**Critical 修复：**
+
+- `utils/checkpoint.py`：`load_state_dict` 增加 `strict=False`，修复 README 声明与代码实现不符的问题。现在会打印详细的 missing/unexpected key 报告，新旧结构不匹配时不再直接报错
+- `visualization/attention_vis.py`：修复 `gat.fc` 不存在（应为 `gat.proj`）导致的 `AttributeError`；修复手动复现 encoder 调用链时注意力权重未被写入缓存的问题，改为直接调用 `model.encoder(x)` 触发完整前向；修复 DataLoader 二元组解包错误
+- `visualization/experiment_report.py`：修复 DataLoader 二元组解包错误（`MMFiDataset` 返回三元组）
+- `visualization/joint_error_analysis.py`：修复 DataLoader 二元组解包错误
+- `visualization/tsne_analysis.py`：修复 DataLoader 二元组解包错误
+
+**Design 修复：**
+
+- `models/model.py`：域判别器改为作用于 **shared** 特征（原版作用于 private 特征，缺乏对抗意义）。正确做法是对 shared 特征施加 GRL，迫使 encoder 产生域不变的 shared 表示
+- `models/transformer.py`：`TemporalTransformer` 改为对每个节点独立建模（`(B*N, T, D)`），原版先对节点做均值再广播，导致所有节点在 Temporal 之后特征完全相同，破坏了后续 CrossSensorAttention 的节点多样性
+- `losses/losses.py`：帧间位移监督语义明确为"末帧相对首帧的关节位移"，权重从 0.5 降至 0.1，避免与 `L_pose` 量级相近时主导梯度
+
+**Minor 修复：**
+
+- `visualization/attention_vis.py`、`experiment_report.py`、`joint_error_analysis.py`、`tsne_analysis.py`：`--dim` 默认值从 64 统一修正为 256，与 `config/default.yaml` 保持一致
+- `dataset/mmfi_dataset.py`：不再在预处理阶段对天线维度做加权求和（原版输出 `(P, 4)` 丢失空间信息）。修复后保留 `(N, P, 4)` 形状，展平为 `(N, P*C)` 输入模型，让 GAT/CrossSensorAttention 自行学习天线间关系。旧行为可通过 `keep_spatial=False` 恢复
+- `visualization/plot_loss.py`：将 `plt.show()` 改为 `plt.savefig()`，避免在服务器环境挂起；添加非交互式 Agg 后端声明，与项目其他可视化模块风格统一
+
+---
+
+**v2**
+- `mmfi_dataset.py`：新增根节点中心化，解决 MPJPE 与 PA-MPJPE 差距过大问题
+- `mmfi_dataset.py`：新增预处理缓存（`cache_dir`），GPU 利用率从 <5% 提升至 70%+
+- `losses.py`：新增骨骼长度一致性损失（`L_bone`）
+- `test_single.py` / `test_cross_domain.py`：测试脚本统一改为 `--work` 参数
 
 **v1**
 - 初始版本：GAT + CrossSensorAttention + TemporalTransformer 编码器
@@ -413,11 +445,11 @@ log:
 
 **Q: MPJPE 很高但 PA-MPJPE 正常，是什么原因？**
 
-这是**全局位置偏移**问题。PA-MPJPE 在计算前会对齐全局位置，如果两者差距很大（如 MPJPE=344mm，PA-MPJPE=108mm），说明模型学到了骨架形状，但预测的绝对位置偏移很大。根本原因是 CSI 信号本身不包含房间绝对坐标信息。本项目已通过**根节点中心化**解决此问题——训练和测试均在相对坐标空间进行，MPJPE 应接近 PA-MPJPE 量级。
+这是**全局位置偏移**问题。PA-MPJPE 在计算前会对齐全局位置，如果两者差距很大（如 MPJPE=344mm，PA-MPJPE=108mm），说明模型学到了骨架形状，但预测的绝对位置偏移很大。本项目已通过**根节点中心化**解决此问题——训练和测试均在相对坐标空间进行，MPJPE 应接近 PA-MPJPE 量级。
 
-**Q: GPU 利用率很低（< 10%），GPU 几乎空转？**
+**Q: GPU 利用率很低（< 10%）？**
 
-数据加载是瓶颈，每帧需要实时读取 `.mat` 文件并执行 CSI 预处理。解决方法是开启预处理缓存：
+开启预处理缓存：
 
 ```yaml
 # config/default.yaml
@@ -429,20 +461,31 @@ data:
 
 **Q: 训练时出现 NaN loss？**
 
-loss 出现 NaN 通常由 CSI 数据中的异常值引起。代码中已内置 NaN batch 跳过机制，并在数据加载时做了 `nan_to_num` 清理。如果频繁出现，可以：
+代码已内置 NaN batch 跳过机制，并在数据加载时做了 `nan_to_num` 清理。如果频繁出现，可以：
 - 适当减小学习率（`--lr 5e-5`）
 - 检查 `.mat` 文件是否有损坏帧
 
 **Q: 显存不足（OOM）？**
 
-GAT 层的全节点注意力是主要显存消耗点。可通过以下方式缓解：
 - 减小 `batch_size`（`--batch_size 32`）
-- 在 `mmfi_dataset.py` 中加大子载波降采样倍率（`::4` 替换 `::2`，N 从 57→28）
-- 减小 `model.dim`（`dim: 32`）
+- 减小 `model.dim`（`dim: 128`）
+- 在 `mmfi_dataset.py` 中加大子载波降采样倍率（`::4` 替换 `::2`）
+
+**Q: 可视化脚本运行时报 "too many values to unpack"？**
+
+这是 v2 及更早版本的已知 bug。`MMFiDataset.__getitem__` 返回三元组 `(csi, pose, root_offset)`，但旧版可视化脚本用二元组解包。**v3 已全部修复**，请更新所有可视化脚本。
+
+**Q: 旧版 checkpoint 能用于 v3 代码吗？**
+
+可以。`utils/checkpoint.py` 使用 `strict=False` 加载，能匹配的层直接复用，并打印详细报告。
+
+但需注意两点：
+1. v3 修改了 `TemporalTransformer` 的节点建模方式（`(B*N, T, D)` 而非均值后 expand），导致 `transformer.encoder` 的权重无法直接复用（节点数 N 不同），会随机初始化该模块；
+2. v3 修改了 `mmfi_dataset.py` 的 CSI 输出维度（保留天线空间信息），若旧模型的 `encoder.gat.proj` 输入维度不匹配，该层也会随机初始化。
+
+建议从头训练以获得最佳效果。
 
 **Q: t-SNE 运行很慢？**
-
-默认每域采样 2000 个样本，如需加速可减小：
 
 ```bash
 python run_all_vis.py ... --n_tsne_samples 500
@@ -450,13 +493,14 @@ python run_all_vis.py ... --n_tsne_samples 500
 
 **Q: 如何添加新的源域/目标域组合？**
 
-通过命令行直接指定，无需修改代码：
-
 ```bash
 python train.py --source E01 E02 --target E03
 python test_cross_domain.py --work best.pth --target E03
 ```
 
-**Q: 旧版 checkpoint 能用于新版代码吗？**
+**Q: domain loss 一直很高（远大于 1.386）？**
 
-可以部分复用。`utils/checkpoint.py` 的 `load_checkpoint` 默认使用 `strict=False`，能匹配的层直接加载，新增或 shape 变化的层随机初始化，并打印详细的加载报告。但注意：旧版训练时未做根节点中心化，坐标系不同，建议从头重新训练以获得最佳效果。
+说明域判别器仍能轻松区分源域与目标域，域对齐尚未成功。可以：
+- 增大训练 epoch（GRL 的 alpha 随 epoch 线性增大，需要足够轮数才能充分对抗）
+- 检查 `model.py` 中域判别器是否正确接在 **shared** 特征上（v3 已修复，旧版接在 private 上无对抗效果）
+- 尝试增大 `domain loss` 权重（`0.01 → 0.05`）
