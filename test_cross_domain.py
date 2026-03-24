@@ -22,8 +22,8 @@ def get_config_simple():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--work',   required=True, help="测试模型权重路径")
-    parser.add_argument('--target', nargs='+',     default=None)
+    parser.add_argument('--work',   required=True)
+    parser.add_argument('--target', nargs='+', default=None)
     args = parser.parse_args()
 
     cfg         = get_config_simple()
@@ -33,7 +33,8 @@ def main():
     loader    = DataLoader(test_data, batch_size=32, shuffle=False,
                            num_workers=8, pin_memory=True)
 
-    model = WiFiPoseModel(dim=cfg.model.dim).to(device)
+    model = WiFiPoseModel(dim=cfg.model.dim,
+                          num_joints=cfg.model.num_joints).to(device)
     ckpt  = torch.load(args.work, map_location=device)
     model.load_state_dict(ckpt['model'], strict=False)
     print(f"Loaded: {args.work}")
@@ -41,15 +42,13 @@ def main():
 
     all_pred, all_gt = [], []
     with torch.no_grad():
-        # 数据集返回三元组 (csi, pose_centered, root_offset)
         for x, y, _ in loader:
             x = x.to(device)
-            pose, _, _, _, _, _ = model(x, x, alpha=0.0)
+            pose, _, _, _, _, _, _ = model(x, x, alpha=0.0)
             all_pred.append(pose.cpu())
-            all_gt.append(y[:, 0].cpu())   # 已中心化的第 0 帧 GT
+            all_gt.append(y[:, 0].cpu())
 
     metrics = compute_metrics(all_pred, all_gt)
-
     print("\n===== RESULTS =====")
     for k, v in metrics.items():
         print(f"{k}: {v:.4f}")

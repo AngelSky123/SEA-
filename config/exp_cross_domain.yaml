@@ -3,5 +3,5 @@ domain:
   target: [E04]
 
 train:
-  epochs: 100
-  batch_size: 8
+  epochs: 80
+  batch_size: 64

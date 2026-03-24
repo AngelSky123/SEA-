@@ -13,7 +13,6 @@ from utils.checkpoint import save_checkpoint, load_checkpoint
 
 torch.backends.cudnn.benchmark = True
 device = "cuda" if torch.cuda.is_available() else "cpu"
-
 from torch.cuda.amp import autocast, GradScaler
 scaler = GradScaler()
 
@@ -29,7 +28,6 @@ def main():
     exp_name = time.strftime("%Y%m%d_%H%M%S")
     save_dir = os.path.join(cfg.log.save_dir, exp_name)
     os.makedirs(save_dir, exist_ok=True)
-
     with open(os.path.join(save_dir, "config.yaml"), 'w') as f:
         yaml.dump(cfg.__dict__, f)
 
@@ -43,13 +41,14 @@ def main():
                               cfg.data.seq_len, cache_dir=cache_dir)
 
     source_loader = DataLoader(source_data, batch_size=cfg.train.batch_size,
-                               shuffle=True,  num_workers=8,
+                               shuffle=True, num_workers=8,
                                pin_memory=True, drop_last=True)
     target_loader = DataLoader(target_data, batch_size=cfg.train.batch_size,
-                               shuffle=True,  num_workers=8,
+                               shuffle=True, num_workers=8,
                                pin_memory=True, drop_last=True)
 
-    model     = WiFiPoseModel(dim=cfg.model.dim).to(device)
+    model = WiFiPoseModel(dim=cfg.model.dim,
+                          num_joints=cfg.model.num_joints).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.train.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=cfg.train.epochs, eta_min=cfg.train.lr * 0.01)
@@ -60,6 +59,7 @@ def main():
             cfg.resume, model, optimizer)
 
     best_loss = float('inf')
+    loss_keys = ["pose", "vel", "bone", "align", "domain", "orth"]
 
     for epoch in range(start_epoch, cfg.train.epochs):
         model.train()
@@ -68,24 +68,21 @@ def main():
 
         epoch_loss_sum = 0.0
         epoch_steps    = 0
-        loss_keys      = ["pose", "bone", "align", "domain", "orth"]
         comp_sum       = {k: 0.0 for k in loss_keys}
 
         for i, batch_s in enumerate(source_loader):
-            # 数据集返回三元组：(csi, pose_centered, root_offset)
-            xs, ys, _  = batch_s
-            xt, _, _   = next(target_iter)
+            xs, ys, _ = batch_s
+            xt, _, _  = next(target_iter)
 
             xs = xs.to(device, non_blocking=True)
             ys = ys.to(device, non_blocking=True)
             xt = xt.to(device, non_blocking=True)
 
             optimizer.zero_grad()
-
             with autocast():
-                pose, fs, ft, ds, dt, orth_loss = model(xs, xt, alpha=alpha)
+                pose, vel_pred, fs, ft, ds, dt, orth_loss = model(xs, xt, alpha=alpha)
                 loss, components = compute_loss(
-                    pose, ys, fs, ft, ds, dt, orth_loss)
+                    pose, vel_pred, ys, fs, ft, ds, dt, orth_loss)
 
             if torch.isnan(loss) or torch.isinf(loss):
                 print(f"  [Epoch {epoch}] NaN/Inf at iter {i}, skip")
@@ -108,7 +105,6 @@ def main():
                       f"loss={loss.item():.4f}  {parts}  alpha={alpha:.3f}")
 
         scheduler.step()
-
         if epoch_steps == 0:
             continue
 
@@ -121,7 +117,6 @@ def main():
                  'optimizer': optimizer.state_dict(),
                  'epoch': epoch, 'loss': epoch_avg}
         save_checkpoint(state, save_dir, "latest.pth")
-
         if epoch_avg < best_loss:
             best_loss = epoch_avg
             save_checkpoint(state, save_dir, "best.pth")

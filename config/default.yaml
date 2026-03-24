@@ -1,14 +1,15 @@
 data:
   root: /home/a123456/SEA-/MMFi
-  seq_len: 20   #  从10恢复到20（提升时序建模）
+  seq_len: 20
+  cache_dir: /home/a123456/SEA-/MMFi_cache
 
 train:
-  batch_size: 8   #  核心提升（显存主力）
+  batch_size: 64
   epochs: 50
   lr: 0.0001
 
 model:
-  dim: 128   #  从64→128（模型能力翻倍）
+  dim: 128
   num_joints: 17
 
 domain:
