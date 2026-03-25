@@ -4,7 +4,7 @@ data:
   cache_dir: /home/a123456/SEA-/MMFi_cache
 
 train:
-  batch_size: 16
+  batch_size: 24
   epochs: 50
   lr: 0.0001
 
