@@ -30,10 +30,22 @@ def main():
 
     cfg     = get_config_simple()
     dataset = MMFiDataset(cfg.data.root, [args.env], cfg.data.seq_len)
-    model   = WiFiPoseModel(dim=cfg.model.dim,
-                            num_joints=cfg.model.num_joints).to(device)
 
+    # 修复（v4）：从 checkpoint 读取 in_dim，回退到数据集探测，再回退到 40
     ckpt = torch.load(args.work, map_location=device)
+    if 'in_dim' in ckpt:
+        in_dim = ckpt['in_dim']
+        print(f"  in_dim = {in_dim}  (loaded from checkpoint)")
+    else:
+        sample_csi, _, _ = dataset[0]
+        in_dim = sample_csi.shape[-1]
+        print(f"  in_dim = {in_dim}  (probed from dataset, checkpoint has no in_dim)")
+
+    model = WiFiPoseModel(
+        in_dim=in_dim,
+        dim=cfg.model.dim,
+        num_joints=cfg.model.num_joints,
+    ).to(device)
     model.load_state_dict(ckpt['model'], strict=False)
     model.eval()
     print(f"Loaded: {args.work}")

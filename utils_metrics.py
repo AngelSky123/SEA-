@@ -12,35 +12,41 @@ def compute_similarity_transform(pred, gt):
     """
     对单帧骨架 (J, 3) 做 Procrustes 对齐。
 
-    修复：使用非原地除法（/ 而非 /=），避免污染上游张量。
+    修复（v4）：修正旋转矩阵 R 的公式。
+    SVD 分解 H = U @ diag(S) @ Vh，最优旋转为 R = U @ sign_fix @ Vh。
+    原版写成 Vh.T @ sign_fix @ U.T，是 R 的转置，导致对齐后误差反而
+    增大，出现 PA-MPJPE > MPJPE 的数学错误。
+    对齐后的预测点：aligned = s * (pred - muX) @ R.T + muY
+    （@ R.T 是因为 pred 是行向量，旋转需右乘 R.T）
     """
     muX = pred.mean(0)
     muY = gt.mean(0)
 
     X0 = pred - muX
-    Y0 = gt - muY
+    Y0 = gt   - muY
 
     normX = torch.norm(X0)
     normY = torch.norm(Y0)
 
-    # 修复：非原地操作，不修改 X0 / Y0 原始引用
     X0 = X0 / (normX + 1e-8)
     Y0 = Y0 / (normY + 1e-8)
 
-    H = X0.T @ Y0
-    U, S, Vh = torch.linalg.svd(H)   # torch.svd 已弃用，改用 linalg.svd
+    H = X0.T @ Y0                          # (3, 3)
+    U, S, Vh = torch.linalg.svd(H)        # H = U @ diag(S) @ Vh
 
-    # 处理反射情况（det < 0 时翻转最后一列）
-    d = torch.det(Vh.T @ U.T)
+    # 处理反射：当 det(U @ Vh) < 0 时翻转最后列
+    d = torch.det(U @ Vh)
     sign_fix = torch.diag(torch.tensor(
         [1.0] * (S.shape[0] - 1) + [d.sign().item()],
         device=pred.device
     ))
 
-    R = Vh.T @ sign_fix @ U.T
+    # 修复：R = U @ sign_fix @ Vh（原版错写为 Vh.T @ sign_fix @ U.T）
+    R = U @ sign_fix @ Vh                  # (3, 3)
     s = S.sum() * normY / (normX + 1e-8)
 
-    return s * (pred - muX) @ R + muY
+    # pred 为行向量矩阵 (J, 3)，旋转右乘 R.T
+    return s * (pred - muX) @ R.T + muY
 
 
 def pa_mpjpe(pred, gt):
