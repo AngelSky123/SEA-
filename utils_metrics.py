@@ -12,12 +12,14 @@ def compute_similarity_transform(pred, gt):
     """
     对单帧骨架 (J, 3) 做 Procrustes 对齐。
 
-    修复（v4）：修正旋转矩阵 R 的公式。
-    SVD 分解 H = U @ diag(S) @ Vh，最优旋转为 R = U @ sign_fix @ Vh。
-    原版写成 Vh.T @ sign_fix @ U.T，是 R 的转置，导致对齐后误差反而
-    增大，出现 PA-MPJPE > MPJPE 的数学错误。
-    对齐后的预测点：aligned = s * (pred - muX) @ R.T + muY
-    （@ R.T 是因为 pred 是行向量，旋转需右乘 R.T）
+    已验证的正确公式（H = X0.T @ Y0 约定下）：
+        H   = X0.T @ Y0
+        U,S,Vh = svd(H)
+        d   = det(U @ Vh)          <- 不是 det(Vh.T @ U.T)
+        R   = U @ sign_fix @ Vh    <- 不是 Vh.T @ sign_fix @ U.T
+        ret = s * (pred-muX) @ R + muY   <- @ R，不是 @ R.T
+
+    原版三处全错（det参数、R公式、返回值），导致 PA-MPJPE > MPJPE。
     """
     muX = pred.mean(0)
     muY = gt.mean(0)
@@ -31,22 +33,23 @@ def compute_similarity_transform(pred, gt):
     X0 = X0 / (normX + 1e-8)
     Y0 = Y0 / (normY + 1e-8)
 
-    H = X0.T @ Y0                          # (3, 3)
-    U, S, Vh = torch.linalg.svd(H)        # H = U @ diag(S) @ Vh
+    H = X0.T @ Y0                           # (3, 3)
+    U, S, Vh = torch.linalg.svd(H)
 
-    # 处理反射：当 det(U @ Vh) < 0 时翻转最后列
+    # 修复1：det 的参数是 U @ Vh，不是 Vh.T @ U.T
     d = torch.det(U @ Vh)
     sign_fix = torch.diag(torch.tensor(
         [1.0] * (S.shape[0] - 1) + [d.sign().item()],
         device=pred.device
     ))
 
-    # 修复：R = U @ sign_fix @ Vh（原版错写为 Vh.T @ sign_fix @ U.T）
-    R = U @ sign_fix @ Vh                  # (3, 3)
+    # 修复2：R = U @ sign_fix @ Vh（不是 Vh.T @ sign_fix @ U.T）
+    R = U @ sign_fix @ Vh
+
     s = S.sum() * normY / (normX + 1e-8)
 
-    # pred 为行向量矩阵 (J, 3)，旋转右乘 R.T
-    return s * (pred - muX) @ R.T + muY
+    # 修复3：返回 @ R（不是 @ R.T）
+    return s * (pred - muX) @ R + muY
 
 
 def pa_mpjpe(pred, gt):

@@ -23,10 +23,6 @@ def get_grl_alpha(epoch, total_epochs, max_alpha=1.0):
 
 
 def get_inf_iterator(dataloader):
-    """
-    安全的无限数据流生成器。
-    替换原有的 itertools.cycle，彻底避免目标域数据的内存泄漏和多进程死锁。
-    """
     while True:
         for batch in dataloader:
             yield batch
@@ -50,9 +46,9 @@ def main():
     target_data = MMFiDataset(cfg.data.root, cfg.domain.target,
                               cfg.data.seq_len, cache_dir=cache_dir)
 
-    # 修复（v4）：从数据集探测实际 in_dim，不再硬编码 40
+    # 修复（v4）：探测实际 in_dim，不再硬编码 40
     sample_csi, _, _ = source_data[0]
-    in_dim = sample_csi.shape[-1]   # (T, N, P*C) 最后一维即 in_dim
+    in_dim = sample_csi.shape[-1]
     print(f"  Detected in_dim = {in_dim}  (P*C from MMFiDataset)")
 
     source_loader = DataLoader(source_data, batch_size=cfg.train.batch_size,
@@ -62,10 +58,12 @@ def main():
                                shuffle=True, num_workers=4,
                                pin_memory=True, drop_last=True, timeout=60)
 
+    # 新训练使用修复后的 PoseHead（pose_head_old=False）
     model = WiFiPoseModel(
         in_dim=in_dim,
         dim=cfg.model.dim,
         num_joints=cfg.model.num_joints,
+        pose_head_old=False,
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.train.lr)
@@ -138,13 +136,14 @@ def main():
             f"{k}={comp_sum[k]/epoch_steps:.4f}" for k in loss_keys)
         print(f" Epoch {epoch:03d} done | avg={epoch_avg:.4f} | {parts}")
 
-        # 修复（v4）：checkpoint 中保存 in_dim，供测试脚本恢复模型时使用
+        # 修复（v4）：checkpoint 写入 in_dim 和 pose_head_old，供测试脚本复原模型
         state = {
-            'model':     model.state_dict(),
-            'optimizer': optimizer.state_dict(),
-            'epoch':     epoch,
-            'loss':      epoch_avg,
-            'in_dim':    in_dim,
+            'model':         model.state_dict(),
+            'optimizer':     optimizer.state_dict(),
+            'epoch':         epoch,
+            'loss':          epoch_avg,
+            'in_dim':        in_dim,
+            'pose_head_old': False,
         }
         save_checkpoint(state, save_dir, "latest.pth")
         if epoch_avg < best_loss:
