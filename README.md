@@ -251,6 +251,13 @@ outputs/
     └── epoch_N.pth     # 各 epoch 权重
 ```
 
+v4 起，checkpoint 中额外保存以下字段，供测试脚本自动恢复模型结构：
+
+| 字段 | 说明 |
+|------|------|
+| `in_dim` | 编码器输入维度（P×C，由数据集自动探测） |
+| `pose_head_old` | PoseHead 结构标志：`False` = 新版（仅 x0），`True` = 旧版（concat x0+xT） |
+
 **训练日志示例：**
 
 ```
@@ -274,7 +281,9 @@ python test_cross_domain.py --work ./outputs/<exp_name>/best.pth
 python test_cross_domain.py --work ./outputs/<exp_name>/best.pth --target E04
 ```
 
-输出示例（根节点中心化后的相对坐标评估）：
+测试脚本会自动从 checkpoint 中读取 `in_dim` 和 `pose_head_old`，无需手动指定模型结构。对于不含这些字段的旧版 checkpoint，脚本会通过权重形状自动反推，保持向后兼容。
+
+输出示例：
 
 ```
 ===== RESULTS =====
@@ -293,7 +302,7 @@ python test_single.py \
     --action A01
 ```
 
-生成 `single_pose.png`：GT（绿色）与预测（红色）的 3D 骨架对比图。
+生成 `single_pose.png`：GT（绿色）与预测（红色）的 3D 骨架对比图，预测关节按误差大小着色。
 
 ---
 
@@ -379,6 +388,8 @@ log:
   print_freq: 20             # 每隔多少 iter 打印一次日志
 ```
 
+> `in_dim` 无需在配置文件中指定，训练脚本会在启动时自动从数据集第一个样本探测 `CSI.shape[-1]`，并将结果写入 checkpoint。
+
 **命令行参数优先级：** 命令行 > `--exp` 实验配置 > `--config` 基础配置
 
 **参数说明 — `--resume` 与 `--work` 的区别：**
@@ -395,14 +406,41 @@ log:
 | 指标 | 说明 | 越小越好 |
 |------|------|---------|
 | **MPJPE** | 均关节位置误差，预测与真值的平均欧氏距离（mm）。本项目在根节点中心化后的相对坐标空间计算，已消除全局位置偏移影响 | ✓ |
-| **PA-MPJPE** | Procrustes 对齐后的 MPJPE，额外消除全局旋转/缩放影响，衡量纯姿态形状精度 | ✓ |
+| **PA-MPJPE** | Procrustes 对齐后的 MPJPE，额外消除全局旋转/缩放影响，衡量纯姿态形状精度。数学上必须 ≤ MPJPE | ✓ |
 | **PCK@0.05** | 关节误差 < 0.05m 的比例，衡量粗粒度准确率 | 越大越好 |
 
 ---
 
 ## 更新日志
 
-**v3（当前版本）**
+**v4（当前版本）**
+
+> 修复了 v3 中三处影响评估正确性和预测质量的 bug，建议所有用户更新。
+
+**Critical 修复：**
+
+- `utils_metrics.py`：修复 `compute_similarity_transform` 中三处同时错误的 Procrustes 公式，导致 PA-MPJPE 数学上大于 MPJPE 的异常结果。具体为：
+  1. `det` 的参数从 `det(Vh.T @ U.T)` 修正为 `det(U @ Vh)`
+  2. 旋转矩阵从 `R = Vh.T @ sign_fix @ U.T` 修正为 `R = U @ sign_fix @ Vh`
+  3. 返回值从 `@ R.T` 修正为 `@ R`（与 `H = X0.T @ Y0` 的约定一致）
+
+  三处错误在特定情况下相互"抵消"导致无报错但结果错误，修复后 PA-MPJPE 恢复正常（必然 ≤ MPJPE）。
+
+- `models/pose_head.py`：解耦姿态预测与速度预测。原版将 `concat([x0, xT])` 输入姿态头，导致末帧特征将四肢"拉向"末帧位置，在动作幅度较大的序列中造成预测骨架四肢严重扭曲。修复后姿态头仅使用 `x0`（起始帧特征），速度头仅使用 `(xT - x0)`（运动差分），两者完全解耦。新增 `old_style` 参数（默认 `False`）支持旧 checkpoint 兼容加载。
+
+- `models/model.py`：`in_dim` 不再硬编码为 `40`，改为外部传入参数。原版硬编码值依赖子载波数恰好为 10 的假设（10×4=40），对其他采样配置会导致维度不匹配。修复后由 `train.py` 在启动时从数据集自动探测并传入，同时写入 checkpoint 供测试脚本恢复。
+
+- `train.py`：配合以上修复，启动时自动探测 `in_dim`，使用新版 `PoseHead`（`pose_head_old=False`），checkpoint 中额外保存 `in_dim` 和 `pose_head_old` 字段。
+
+- `test_cross_domain.py` / `test_single.py`：新增 `detect_model_dims()` 函数，通过读取 checkpoint 中权重的形状自动反推 `in_dim`、`dim`、`pose_head_old`，实现对新旧 checkpoint 的完全向后兼容，无需手动指定模型结构参数。
+
+**旧 checkpoint 兼容性说明：**
+
+v4 测试脚本可直接加载 v3 及更早的 checkpoint，无需重新训练即可验证 PA-MPJPE 修复效果。但 `PoseHead` 结构修复（四肢扭曲问题）需要重新训练才能生效，旧 checkpoint 会被自动识别为 `old_style=True` 并以原结构加载。
+
+---
+
+**v3**
 
 > 本次更新修复了 v2 中存在的若干 critical bug 及设计问题，建议所有用户更新。
 
@@ -447,6 +485,24 @@ log:
 
 这是**全局位置偏移**问题。PA-MPJPE 在计算前会对齐全局位置，如果两者差距很大（如 MPJPE=344mm，PA-MPJPE=108mm），说明模型学到了骨架形状，但预测的绝对位置偏移很大。本项目已通过**根节点中心化**解决此问题——训练和测试均在相对坐标空间进行，MPJPE 应接近 PA-MPJPE 量级。
 
+**Q: PA-MPJPE 大于 MPJPE，这正常吗？**
+
+不正常。PA-MPJPE 经过 Procrustes 对齐（消除全局旋转/缩放），数学上必须 ≤ MPJPE。出现反转说明 `utils_metrics.py` 中的 `compute_similarity_transform` 使用了旧版（v3 及以前）的错误公式。请确认已替换为 v4 版本，正确公式为：
+
+```python
+d    = torch.det(U @ Vh)           # 不是 det(Vh.T @ U.T)
+R    = U @ sign_fix @ Vh           # 不是 Vh.T @ sign_fix @ U.T
+ret  = s * (pred - muX) @ R + muY  # 不是 @ R.T
+```
+
+**Q: 预测骨架四肢严重扭曲（腿部/手臂方向异常），如何修复？**
+
+这是 v3 及以前 `PoseHead` 的设计问题：将 `concat([x0, xT])` 输入姿态头，导致末帧特征在动作幅度大时将四肢"拉向"末帧位置。v4 已修复（姿态头仅用 `x0`），但**需要重新训练**才能生效。旧 checkpoint 的头部结构不变，对其评估时四肢扭曲问题依然存在。
+
+**Q: 加载 checkpoint 时报 `size mismatch for head.mlp.0.weight`，怎么处理？**
+
+这是新旧 `PoseHead` 结构不兼容导致的。v4 的测试脚本（`test_cross_domain.py` / `test_single.py`）已内置自动检测逻辑，会通过 checkpoint 中权重的形状反推正确结构并自动适配，不会再出现此报错。如果仍然报错，请确认已替换为 v4 版本的测试脚本。
+
 **Q: GPU 利用率很低（< 10%）？**
 
 开启预处理缓存：
@@ -471,19 +527,17 @@ data:
 - 减小 `model.dim`（`dim: 128`）
 - 在 `mmfi_dataset.py` 中加大子载波降采样倍率（`::4` 替换 `::2`）
 
+**Q: 旧版 checkpoint 能用于 v4 代码吗？**
+
+可以，v4 测试脚本对旧版 checkpoint 完全向后兼容：
+- 若 checkpoint 不含 `in_dim` 字段，脚本自动通过 `encoder.gat.proj.weight` 的形状反推
+- 若 checkpoint 不含 `pose_head_old` 字段，脚本自动通过 `head.mlp.0.weight` 的输入维度判断新旧结构
+
+唯一限制：旧 checkpoint 的 `PoseHead` 是旧版结构（含四肢扭曲问题），评估指标中 MPJPE 和 PCK 不会因此改善，需重新训练。
+
 **Q: 可视化脚本运行时报 "too many values to unpack"？**
 
 这是 v2 及更早版本的已知 bug。`MMFiDataset.__getitem__` 返回三元组 `(csi, pose, root_offset)`，但旧版可视化脚本用二元组解包。**v3 已全部修复**，请更新所有可视化脚本。
-
-**Q: 旧版 checkpoint 能用于 v3 代码吗？**
-
-可以。`utils/checkpoint.py` 使用 `strict=False` 加载，能匹配的层直接复用，并打印详细报告。
-
-但需注意两点：
-1. v3 修改了 `TemporalTransformer` 的节点建模方式（`(B*N, T, D)` 而非均值后 expand），导致 `transformer.encoder` 的权重无法直接复用（节点数 N 不同），会随机初始化该模块；
-2. v3 修改了 `mmfi_dataset.py` 的 CSI 输出维度（保留天线空间信息），若旧模型的 `encoder.gat.proj` 输入维度不匹配，该层也会随机初始化。
-
-建议从头训练以获得最佳效果。
 
 **Q: t-SNE 运行很慢？**
 
