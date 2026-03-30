@@ -6,18 +6,20 @@ class PoseHead(nn.Module):
     """
     姿态回归头。
 
-    修复（v4）：解耦姿态预测与速度预测，新增 old_style 参数向后兼容。
+    修复（v5）：解决均值塌陷问题。
 
-    old_style=True  （旧版，对应已有 checkpoint）：
-        姿态头输入 concat([x0, xT])，in_dim = dim*2
-        — 保留此结构是为了让旧 checkpoint 能直接加载，评估 Bug1 修复效果
+    塌陷根因：x_spa[:, 0, :] 单帧特征对不同动作几乎相同，
+    导致 PoseHead 对所有输入输出几乎相同的均值骨架。
 
-    old_style=False （新版，重训练后使用）：
-        姿态头输入仅 x0，in_dim = dim
-        — 消除末帧特征对第 0 帧预测的干扰，修复四肢扭曲问题
-        — 速度头输入仅 (xT - x0)，两支路完全解耦
+    修复方案（old_style=False 时）：
+      pose 输入 = concat(x_max, motion)，其中：
+        x_max  = x_spa.max(dim=1).values  ← 全序列时间 max-pooling
+                 保留序列中最显著的激活，比单帧 x0 信息量更大
+        motion = xT - x0                  ← 首末运动差分
+                 直接编码运动方向，是区分不同动作最有效的信号
+      pose_in 维度仍为 dim*2，与旧版权重形状兼容（但语义不同，需重训练）
 
-    新训练时默认使用 old_style=False。
+    old_style=True 保留旧版 concat(x0, xT) 结构，用于加载旧 checkpoint。
     """
 
     def __init__(self, dim, num_joints=17, dropout=0.1, old_style=False):
@@ -25,8 +27,7 @@ class PoseHead(nn.Module):
         self.num_joints = num_joints
         self.old_style  = old_style
 
-        # 根据结构选择姿态头输入维度
-        pose_in = dim * 2 if old_style else dim
+        pose_in = dim * 2   # 新旧版输入维度均为 dim*2
 
         self.mlp = nn.Sequential(
             nn.Linear(pose_in, dim * 2),
@@ -57,16 +58,18 @@ class PoseHead(nn.Module):
           vel_pred : (B, J, 3)
         """
         B, T, N, D = x.shape
-        x_spa = x.mean(dim=2)        # (B, T, D)
-        x0 = x_spa[:, 0, :]         # (B, D)
-        xT = x_spa[:, -1, :]        # (B, D)
+        x_spa = x.mean(dim=2)          # (B, T, D)
+        x0 = x_spa[:, 0, :]           # (B, D)
+        xT = x_spa[:, -1, :]          # (B, D)
 
         if self.old_style:
-            # 旧版：concat 输入，兼容旧 checkpoint
-            pose_in = torch.cat([x0, xT], dim=-1)   # (B, 2D)
+            # 旧版：concat(x0, xT)，兼容旧 checkpoint
+            pose_in = torch.cat([x0, xT], dim=-1)
         else:
-            # 新版：仅用 x0，消除末帧干扰
-            pose_in = x0                             # (B, D)
+            # 新版：全序列 max-pool + 运动差分，信息量显著更大
+            x_max   = x_spa.max(dim=1).values          # (B, D)
+            motion  = xT - x0                          # (B, D)
+            pose_in = torch.cat([x_max, motion], dim=-1)  # (B, 2D)
 
         pose     = self.mlp(pose_in).view(B, self.num_joints, 3)
         vel_pred = self.vel_head(xT - x0).view(B, self.num_joints, 3)

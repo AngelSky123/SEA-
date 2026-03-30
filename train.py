@@ -46,7 +46,6 @@ def main():
     target_data = MMFiDataset(cfg.data.root, cfg.domain.target,
                               cfg.data.seq_len, cache_dir=cache_dir)
 
-    # 修复（v4）：探测实际 in_dim，不再硬编码 40
     sample_csi, _, _ = source_data[0]
     in_dim = sample_csi.shape[-1]
     print(f"  Detected in_dim = {in_dim}  (P*C from MMFiDataset)")
@@ -58,7 +57,6 @@ def main():
                                shuffle=True, num_workers=4,
                                pin_memory=True, drop_last=True, timeout=60)
 
-    # 新训练使用修复后的 PoseHead（pose_head_old=False）
     model = WiFiPoseModel(
         in_dim=in_dim,
         dim=cfg.model.dim,
@@ -76,7 +74,7 @@ def main():
             cfg.resume, model, optimizer)
 
     best_loss = float('inf')
-    loss_keys = ["pose", "vel", "bone", "align", "domain", "orth"]
+    loss_keys = ["pose", "vel", "bone", "align", "domain", "orth", "diversity"]
 
     target_iter = iter(get_inf_iterator(target_loader))
 
@@ -136,7 +134,13 @@ def main():
             f"{k}={comp_sum[k]/epoch_steps:.4f}" for k in loss_keys)
         print(f" Epoch {epoch:03d} done | avg={epoch_avg:.4f} | {parts}")
 
-        # 修复（v4）：checkpoint 写入 in_dim 和 pose_head_old，供测试脚本复原模型
+        # diversity 监控
+        div_avg = comp_sum["diversity"] / epoch_steps
+        if div_avg > 0.05:
+            print(f"  [Diversity] {div_avg:.4f} -- collapse still present")
+        elif div_avg < 0.001:
+            print(f"  [Diversity] {div_avg:.4f} -- predictions are diverse!")
+
         state = {
             'model':         model.state_dict(),
             'optimizer':     optimizer.state_dict(),
