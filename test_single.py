@@ -22,45 +22,41 @@ def get_config_simple():
 
 def detect_model_dims(ckpt_state, fallback_dim=256):
     """
-    从 checkpoint state_dict 反推 in_dim、dim、pose_head_old。
+    从 checkpoint state_dict 反推 in_dim、dim。
+
+    修复（v6）：不再尝试从权重形状推断 pose_head_old。
     """
-    in_dim        = None
-    dim           = fallback_dim
-    pose_head_old = False
+    in_dim = None
+    dim    = fallback_dim
 
     if 'encoder.gat.proj.weight' in ckpt_state:
         w      = ckpt_state['encoder.gat.proj.weight']
         dim    = w.shape[0]
         in_dim = w.shape[1]
 
-    if 'head.mlp.0.weight' in ckpt_state:
-        pose_in = ckpt_state['head.mlp.0.weight'].shape[1]
-        if pose_in == dim * 2:
-            pose_head_old = True
-
-    return in_dim, dim, pose_head_old
+    return in_dim, dim
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--env',     default='E04')
-    parser.add_argument('--subject', default='S35')
-    parser.add_argument('--action',  default='A01')
+    parser.add_argument('--subject', default='S34')
+    parser.add_argument('--action',  default='A13')
     parser.add_argument('--work',    required=True)
     args = parser.parse_args()
 
     cfg     = get_config_simple()
     dataset = MMFiDataset(cfg.data.root, [args.env], cfg.data.seq_len)
 
-    ckpt = torch.load(args.work, map_location=device)
+    ckpt = torch.load(args.work, map_location=device, weights_only=False)
 
     if 'in_dim' in ckpt:
         in_dim = ckpt['in_dim']
-        _, dim_ckpt, pose_head_old = detect_model_dims(
+        _, dim_ckpt = detect_model_dims(
             ckpt['model'], fallback_dim=cfg.model.dim)
         print(f"  in_dim = {in_dim}  (from checkpoint metadata)")
     else:
-        in_dim, dim_ckpt, pose_head_old = detect_model_dims(
+        in_dim, dim_ckpt = detect_model_dims(
             ckpt['model'], fallback_dim=cfg.model.dim)
         if in_dim is None:
             sample_csi, _, _ = dataset[0]
@@ -69,8 +65,11 @@ def main():
         else:
             print(f"  in_dim = {in_dim}  (inferred from checkpoint weights)")
 
+    # 修复（v6）：从 checkpoint metadata 读取，不从权重形状推断
+    pose_head_old = ckpt.get('pose_head_old', True)
+
     print(f"  dim    = {dim_ckpt}")
-    print(f"  PoseHead: {'old-style concat(x0,xT)' if pose_head_old else 'new-style x0-only'}")
+    print(f"  PoseHead: {'old-style concat(x0,xT)' if pose_head_old else 'new-style max-pool+motion'}")
 
     model = WiFiPoseModel(
         in_dim=in_dim,

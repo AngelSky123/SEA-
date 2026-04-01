@@ -13,11 +13,29 @@ from utils.checkpoint import save_checkpoint, load_checkpoint
 torch.backends.cudnn.benchmark = True
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-from torch.cuda.amp import autocast, GradScaler
-scaler = GradScaler()
+try:
+    from torch.amp import autocast, GradScaler
+    scaler = GradScaler('cuda')
+    _autocast_ctx = lambda: autocast('cuda')
+except (ImportError, TypeError):
+    from torch.cuda.amp import autocast, GradScaler
+    scaler = GradScaler()
+    _autocast_ctx = lambda: autocast()
 
 
-def get_grl_alpha(epoch, total_epochs, max_alpha=1.0):
+def get_grl_alpha(epoch, total_epochs, max_alpha=0.1):
+    """
+    修复（v6）：max_alpha 从 1.0 降至 0.1。
+
+    诊断发现 alpha=1.0 时，域对抗梯度（~0.014）与姿态梯度（~0.010）同量级，
+    导致 Encoder 塌陷为常数输出（cos_sim=0.9999）——这是最简单的"域不变"解。
+
+    max_alpha=0.1 将对抗梯度压制到姿态梯度的 ~1/10，
+    足够实现域对齐（domain loss 仍会趋向 1.386），但不会摧毁输入信息。
+
+    如果 domain loss 在训练后期显著 > 1.5（说明对齐不足），可适当上调至 0.2-0.3。
+    如果 encoder 仍然塌陷（诊断 cos_sim > 0.99），需进一步下调至 0.05。
+    """
     p = epoch / max(total_epochs - 1, 1)
     return max_alpha * p
 
@@ -96,7 +114,7 @@ def main():
 
             optimizer.zero_grad()
 
-            with autocast():
+            with _autocast_ctx():
                 pose, vel_pred, fs, ft, ds, dt, orth_loss = model(xs, xt, alpha=alpha)
                 loss, components = compute_loss(
                     pose, vel_pred, ys, fs, ft, ds, dt, orth_loss)
