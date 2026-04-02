@@ -8,12 +8,6 @@ from .disentangle import DomainDisentangle
 
 class WiFiPoseModel(nn.Module):
     def __init__(self, in_dim=40, dim=64, num_joints=17, pose_head_old=False):
-        """
-        修复（v4）：
-        - in_dim 不再硬编码，由调用方从数据集探测后传入
-        - pose_head_old=True  → 用旧版 PoseHead（concat x0+xT），兼容旧 checkpoint
-        - pose_head_old=False → 用新版 PoseHead（仅 x0），需重新训练
-        """
         super().__init__()
         self.encoder     = Encoder(in_dim=in_dim, dim=dim)
         self.disentangle = DomainDisentangle(dim)
@@ -28,7 +22,12 @@ class WiFiPoseModel(nn.Module):
         fs_shared, fs_private = self.disentangle(fs_raw)
         ft_shared, ft_private = self.disentangle(ft_raw)
 
-        pose, vel_pred = self.head(fs_shared)
+        pose_s, vel_pred = self.head(fs_shared)
+
+        # 修复（v6）：同时预测目标域姿态，供 diversity loss 约束
+        # 目标域无 GT 标签，不参与 pose/vel/bone loss，
+        # 但参与 diversity loss，防止目标域预测塌陷为常数
+        pose_t, _ = self.head(ft_shared)
 
         fs_s_avg = fs_shared.mean(dim=(1, 2))
         ft_s_avg = ft_shared.mean(dim=(1, 2))
@@ -41,4 +40,4 @@ class WiFiPoseModel(nn.Module):
         orth_t = DomainDisentangle.orthogonality_loss(ft_s_avg, ft_p_avg)
         orth_loss = (orth_s + orth_t) * 0.5
 
-        return pose, vel_pred, fs_shared, ft_shared, ds, dt, orth_loss
+        return pose_s, vel_pred, fs_shared, ft_shared, ds, dt, orth_loss, pose_t

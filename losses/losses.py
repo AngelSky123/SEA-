@@ -12,11 +12,7 @@ EDGES = [
 def compute_diversity_loss(pred):
     """
     批内多样性损失：惩罚同一 batch 内预测骨架过于相似的情况。
-
-    原理：计算 batch 内所有样本对之间的平均骨架距离，
-    使用 margin hinge，只惩罚距离低于 margin 的样本对。
-    margin=0.10 表示：不同样本的平均关节距离至少要有 10cm，
-    否则施加惩罚。
+    margin=0.10 表示：不同样本的平均关节距离至少要有 10cm。
     """
     B = pred.shape[0]
     if B < 2:
@@ -27,24 +23,25 @@ def compute_diversity_loss(pred):
     dist = diff.norm(dim=-1)                               # (B, B)
 
     mask = torch.triu(torch.ones(B, B, device=pred.device), diagonal=1).bool()
-    pairwise_dist = dist[mask]                             # (B*(B-1)/2,)
+    pairwise_dist = dist[mask]
 
-    margin = 0.10   # 10cm
+    margin = 0.10
     loss = F.relu(margin - pairwise_dist).mean()
     return loss
 
 
-def compute_loss(pred, vel_pred, gt, fs, ft, ds, dt, orth_loss=None):
+def compute_loss(pred, vel_pred, gt, fs, ft, ds, dt,
+                 orth_loss=None, pred_t=None):
     """
-    pred      : (B, J, 3)    — 预测第 0 帧姿态（相对坐标）
-    vel_pred  : (B, J, 3)    — 预测帧间位移（首帧→末帧）
-    gt        : (B, T, J, 3) — 真值序列（已中心化）
+    pred      : (B, J, 3)    — 源域预测第 0 帧姿态
+    vel_pred  : (B, J, 3)    — 源域预测帧间位移
+    gt        : (B, T, J, 3) — 源域真值序列
     fs / ft   : (B, T, N, D) — 源域 / 目标域 shared 特征
-    ds / dt   : (B, 2)       — 域判别器输出（已过 GRL）
+    ds / dt   : (B, 2)       — 域判别器输出
+    pred_t    : (B, J, 3)    — 目标域预测姿态（v6 新增，用于 diversity）
 
-    修复（v5）：新增 diversity_loss，对抗均值塌陷。
-    均值塌陷诊断标志：batch 内样本间预测距离 < 30mm，各关节 std < 5mm。
-    diversity_loss 权重 1.0，与 pose_loss 同级，强制模型产生有区分度的预测。
+    修复（v6）：diversity loss 同时作用于源域和目标域预测。
+    原版仅约束源域，目标域无任何多样性激励，导致目标域预测塌陷。
     """
 
     # ── 1. 姿态 MSE ──────────────────────────────────────────────────
@@ -75,8 +72,12 @@ def compute_loss(pred, vel_pred, gt, fs, ft, ds, dt, orth_loss=None):
     orth = (orth_loss if orth_loss is not None
             else torch.tensor(0.0, device=pred.device))
 
-    # ── 7. 多样性损失（v5 新增，对抗均值塌陷）────────────────────────
-    diversity_loss = compute_diversity_loss(pred)
+    # ── 7. 多样性损失（v6：源域 + 目标域）────────────────────────────
+    diversity_s = compute_diversity_loss(pred)
+    diversity_t = (compute_diversity_loss(pred_t)
+                   if pred_t is not None
+                   else torch.tensor(0.0, device=pred.device))
+    diversity_loss = diversity_s + diversity_t
 
     total = (pose_loss
              + 0.1  * vel_loss

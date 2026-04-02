@@ -21,24 +21,12 @@ def get_config_simple():
 
 
 def detect_model_dims(ckpt_state, fallback_dim=256):
-    """
-    从 checkpoint state_dict 反推 in_dim、dim。
-
-    encoder.gat.proj.weight : (dim, in_dim)
-
-    修复（v6）：不再尝试从权重形状推断 pose_head_old。
-    v5 新旧 PoseHead 输入维度均为 dim*2，权重形状完全相同，
-    无法通过 head.mlp.0.weight.shape 区分。
-    pose_head_old 应从 checkpoint metadata 字段读取。
-    """
     in_dim = None
     dim    = fallback_dim
-
     if 'encoder.gat.proj.weight' in ckpt_state:
-        w      = ckpt_state['encoder.gat.proj.weight']   # (dim, in_dim)
+        w      = ckpt_state['encoder.gat.proj.weight']
         dim    = w.shape[0]
         in_dim = w.shape[1]
-
     return in_dim, dim
 
 
@@ -57,7 +45,6 @@ def main():
 
     ckpt = torch.load(args.work, map_location=device, weights_only=False)
 
-    # ── 反推 in_dim 和 dim ────────────────────────────────────────────
     if 'in_dim' in ckpt:
         in_dim = ckpt['in_dim']
         _, dim_ckpt = detect_model_dims(
@@ -73,14 +60,10 @@ def main():
         else:
             print(f"  in_dim = {in_dim}  (inferred from checkpoint weights)")
 
-    # ── 反推 pose_head_old ────────────────────────────────────────────
-    # 修复（v6）：v5 新旧 PoseHead 权重形状相同（均为 dim*2 输入），
-    # 无法从权重反推。必须依赖 checkpoint metadata。
-    # 若 metadata 中无此字段，说明是 v4 之前的旧 checkpoint，默认 True。
     pose_head_old = ckpt.get('pose_head_old', True)
 
     print(f"  dim    = {dim_ckpt}")
-    print(f"  PoseHead: {'old-style concat(x0,xT)' if pose_head_old else 'new-style max-pool+motion'}")
+    print(f"  PoseHead: {'old-style' if pose_head_old else 'new-style'}")
 
     model = WiFiPoseModel(
         in_dim=in_dim,
@@ -104,7 +87,9 @@ def main():
     with torch.no_grad():
         for x, y, _ in loader:
             x = x.to(device)
-            pose, _, _, _, _, _, _ = model(x, x, alpha=0.0)
+            # model 返回 8 个值，只需要 pose_s（第一个）
+            outputs = model(x, x, alpha=0.0)
+            pose = outputs[0]
             all_pred.append(pose.cpu())
             all_gt.append(y[:, 0].cpu())
 

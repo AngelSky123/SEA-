@@ -21,19 +21,12 @@ def get_config_simple():
 
 
 def detect_model_dims(ckpt_state, fallback_dim=256):
-    """
-    从 checkpoint state_dict 反推 in_dim、dim。
-
-    修复（v6）：不再尝试从权重形状推断 pose_head_old。
-    """
     in_dim = None
     dim    = fallback_dim
-
     if 'encoder.gat.proj.weight' in ckpt_state:
         w      = ckpt_state['encoder.gat.proj.weight']
         dim    = w.shape[0]
         in_dim = w.shape[1]
-
     return in_dim, dim
 
 
@@ -54,22 +47,15 @@ def main():
         in_dim = ckpt['in_dim']
         _, dim_ckpt = detect_model_dims(
             ckpt['model'], fallback_dim=cfg.model.dim)
-        print(f"  in_dim = {in_dim}  (from checkpoint metadata)")
     else:
         in_dim, dim_ckpt = detect_model_dims(
             ckpt['model'], fallback_dim=cfg.model.dim)
         if in_dim is None:
             sample_csi, _, _ = dataset[0]
             in_dim = sample_csi.shape[-1]
-            print(f"  in_dim = {in_dim}  (probed from dataset)")
-        else:
-            print(f"  in_dim = {in_dim}  (inferred from checkpoint weights)")
 
-    # 修复（v6）：从 checkpoint metadata 读取，不从权重形状推断
     pose_head_old = ckpt.get('pose_head_old', True)
-
-    print(f"  dim    = {dim_ckpt}")
-    print(f"  PoseHead: {'old-style concat(x0,xT)' if pose_head_old else 'new-style max-pool+motion'}")
+    print(f"  in_dim={in_dim}  dim={dim_ckpt}  PoseHead={'old' if pose_head_old else 'new'}")
 
     model = WiFiPoseModel(
         in_dim=in_dim,
@@ -80,7 +66,7 @@ def main():
 
     result = model.load_state_dict(ckpt['model'], strict=False)
     if not result.missing_keys and not result.unexpected_keys:
-        print("  All keys matched perfectly.")
+        print("  All keys matched.")
     else:
         if result.missing_keys:
             print(f"  Missing keys ({len(result.missing_keys)}): {result.missing_keys}")
@@ -102,9 +88,9 @@ def main():
     gt = pose[0].to(device)
 
     with torch.no_grad():
-        pred, _, _, _, _, _, _ = model(x, x, alpha=0.0)
+        outputs = model(x, x, alpha=0.0)
+        pred = outputs[0][0]
 
-    pred = pred[0]
     print(f"MPJPE:    {mpjpe(pred, gt).item():.4f} m")
     print(f"PA-MPJPE: {pa_mpjpe(pred, gt).item():.4f} m")
     print(f"PCK@50mm: {pck(pred, gt, 0.05).item():.4f}")

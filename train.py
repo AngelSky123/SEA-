@@ -23,20 +23,16 @@ except (ImportError, TypeError):
     _autocast_ctx = lambda: autocast()
 
 
-def get_grl_alpha(epoch, total_epochs, max_alpha=0.1):
+def get_grl_alpha(epoch, total_epochs, max_alpha=0.1, warmup=10):
     """
-    修复（v6）：max_alpha 从 1.0 降至 0.1。
-
-    诊断发现 alpha=1.0 时，域对抗梯度（~0.014）与姿态梯度（~0.010）同量级，
-    导致 Encoder 塌陷为常数输出（cos_sim=0.9999）——这是最简单的"域不变"解。
-
-    max_alpha=0.1 将对抗梯度压制到姿态梯度的 ~1/10，
-    足够实现域对齐（domain loss 仍会趋向 1.386），但不会摧毁输入信息。
-
-    如果 domain loss 在训练后期显著 > 1.5（说明对齐不足），可适当上调至 0.2-0.3。
-    如果 encoder 仍然塌陷（诊断 cos_sim > 0.99），需进一步下调至 0.05。
+    修复（v6）：
+    - max_alpha=0.1，防止对抗梯度过强导致 Encoder 塌陷
+    - warmup 阶段（前 10 个 epoch）alpha=0，纯监督训练
+      让 Encoder 先学会提取姿态特征，再引入域对抗
     """
-    p = epoch / max(total_epochs - 1, 1)
+    if epoch < warmup:
+        return 0.0
+    p = (epoch - warmup) / max(total_epochs - warmup - 1, 1)
     return max_alpha * p
 
 
@@ -115,9 +111,12 @@ def main():
             optimizer.zero_grad()
 
             with _autocast_ctx():
-                pose, vel_pred, fs, ft, ds, dt, orth_loss = model(xs, xt, alpha=alpha)
+                # 修复（v6）：model 现在返回 8 个值，新增 pose_t
+                pose, vel_pred, fs, ft, ds, dt, orth_loss, pose_t = \
+                    model(xs, xt, alpha=alpha)
                 loss, components = compute_loss(
-                    pose, vel_pred, ys, fs, ft, ds, dt, orth_loss)
+                    pose, vel_pred, ys, fs, ft, ds, dt, orth_loss,
+                    pred_t=pose_t)    # 传入目标域预测
 
             if torch.isnan(loss) or torch.isinf(loss):
                 print(f"  [Epoch {epoch}] NaN/Inf at iter {i}, skip")
@@ -152,7 +151,6 @@ def main():
             f"{k}={comp_sum[k]/epoch_steps:.4f}" for k in loss_keys)
         print(f" Epoch {epoch:03d} done | avg={epoch_avg:.4f} | {parts}")
 
-        # diversity 监控
         div_avg = comp_sum["diversity"] / epoch_steps
         if div_avg > 0.05:
             print(f"  [Diversity] {div_avg:.4f} -- collapse still present")
