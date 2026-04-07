@@ -23,10 +23,6 @@ class WiFiPoseModel(nn.Module):
         ft_shared, ft_private = self.disentangle(ft_raw)
 
         pose_s, vel_pred = self.head(fs_shared)
-
-        # 修复（v6）：同时预测目标域姿态，供 diversity loss 约束
-        # 目标域无 GT 标签，不参与 pose/vel/bone loss，
-        # 但参与 diversity loss，防止目标域预测塌陷为常数
         pose_t, _ = self.head(ft_shared)
 
         fs_s_avg = fs_shared.mean(dim=(1, 2))
@@ -40,4 +36,9 @@ class WiFiPoseModel(nn.Module):
         orth_t = DomainDisentangle.orthogonality_loss(ft_s_avg, ft_p_avg)
         orth_loss = (orth_s + orth_t) * 0.5
 
-        return pose_s, vel_pred, fs_shared, ft_shared, ds, dt, orth_loss, pose_t
+        # encoder 层面均值特征（VICReg 用）
+        enc_feat_s = fs_raw.mean(dim=(1, 2))
+        enc_feat_t = ft_raw.mean(dim=(1, 2))
+
+        return (pose_s, vel_pred, fs_shared, ft_shared, ds, dt,
+                orth_loss, pose_t, enc_feat_s, enc_feat_t)
