@@ -9,35 +9,50 @@ class MMFiDataset(Dataset):
     """
     MMFi CSI 数据集。
 
-    改进：
-      - 支持预处理缓存（cache_dir），消除 CPU IO 瓶颈
-      - __getitem__ 返回根节点中心化的 pose，消除全局位置偏移问题
-        返回值：(csi, pose_centered, root_offset)
-        pose_centered : (T, J, 3)，已减去第 0 帧 Hip 坐标
-        root_offset   : (3,)，原始根节点坐标，供测试时反归一化使用
+    修复（v12）：
+      _process_mat 的维度解释完全修正。
 
-    修复（v3）：
-      - _process_mat 不再对天线维度做加权求和（原 shape: (P, 4)）。
-        加权聚合会把多天线的空间信息在数据预处理阶段丢失，导致后续
-        GAT/CrossSensorAttention 无法建模天线间的空间关系。
-        修复后保留 (N, P, 4) 形状，N = 天线数（子采样后），P = 子载波数。
-        对应地，Encoder 的 in_dim 仍为 4，但输入维度变为 (B, T, N, P*4)
-        ——此处保持 P 维度展平后作为特征，让模型自行学习子载波间关系。
-        如需兼容旧模型，可将 keep_spatial=False 还原为聚合模式。
+      原版假设 .mat shape 为 (Tx发射天线, S接收天线, P子载波)，
+      实际 MMFi 的 CSIamp/CSIphase shape 为:
+
+        (Rx接收天线=3, Subcarrier子载波=114, Packet包数=10)
+
+      原版错误地将前两维合并得到 171 个"节点"，每个节点其实是
+      (天线, 子载波) 对，语义不合理且计算量大。
+
+      修复后：
+        - N = 3（接收天线）= GAT 节点数
+        - 对 Packet 维度做均值聚合（每帧 10 个包取平均，获得稳定测量）
+        - 子载波维度可选降采样后，展平为每个节点的特征
+        - in_dim = n_subcarriers × 4
+
+      这样 GAT 在 3 个天线节点间做注意力，物理意义正确，
+      且计算量从 O(171²) 降到 O(3²)。
+
+    改进（v2+）：
+      - 支持预处理缓存（cache_dir），消除 CPU IO 瓶颈
+      - __getitem__ 返回根节点中心化的 pose
+
+    返回值：(csi, pose_centered, root_offset)
+      csi           : (T, N, C)  N=3 天线, C=子载波数×4
+      pose_centered : (T, J, 3)  已减去第 0 帧 Hip 坐标
+      root_offset   : (3,)       原始根节点坐标
     """
 
     def __init__(self, root, envs, seq_len=20, cache_dir=None,
-                 keep_spatial=True):
+                 sub_downsample=2):
         """
-        keep_spatial : bool
-            True  — 保留天线维度，返回 csi shape (T, N, C)，C = subcarrier * 4
-            False — 原始加权聚合模式，返回 csi shape (T, 1, C)（向后兼容）
+        sub_downsample : int
+            子载波降采样倍率。
+            1 = 不降采样 (114 子载波, in_dim=456)
+            2 = 每 2 取 1 (57 子载波, in_dim=228)（默认）
+            4 = 每 4 取 1 (28 子载波, in_dim=112)（显存不足时使用）
         """
-        self.samples      = []
-        self.seq_len      = seq_len
-        self.cache_dir    = cache_dir
-        self.root         = root
-        self.keep_spatial = keep_spatial
+        self.samples        = []
+        self.seq_len        = seq_len
+        self.cache_dir      = cache_dir
+        self.root           = root
+        self.sub_downsample = sub_downsample
 
         if cache_dir:
             os.makedirs(cache_dir, exist_ok=True)
@@ -82,7 +97,9 @@ class MMFiDataset(Dataset):
         rel          = os.path.relpath(csi_dir, start=self.root)
         cache_subdir = os.path.join(self.cache_dir, rel)
         os.makedirs(cache_subdir, exist_ok=True)
-        return os.path.join(cache_subdir, frame_name.replace(".mat", ".npy"))
+        # 缓存文件名中编码降采样倍率，避免不同配置的缓存冲突
+        base = frame_name.replace(".mat", f"_ds{self.sub_downsample}.npy")
+        return os.path.join(cache_subdir, base)
 
     def _prebuild_cache(self):
         all_frames = set()
@@ -114,29 +131,45 @@ class MMFiDataset(Dataset):
 
         print("  Cache build complete.")
 
-    # ── CSI 预处理 ───────────────────────────────────────────────────────
+    # ── CSI 预处理（v12 修正）────────────────────────────────────────────
 
     def _process_mat(self, path):
         """
-        返回 shape: (N, P, 4)
-          N = 天线数（降采样后）
-          P = 子载波数（降采样后）
-          4 = [real, imag, amp, phase_diff]
+        修正后的 CSI 预处理。
 
-        修复：不再对天线做加权求和，保留空间维度供模型学习。
+        .mat 文件结构：
+          CSIamp:   (Rx=3, Subcarrier=114, Packet=10)
+          CSIphase: (Rx=3, Subcarrier=114, Packet=10)
+
+        处理流程：
+          1. 提取 amp, phase
+          2. Phase unwrap → phase_diff（相邻子载波差分）
+          3. 幅度归一化（per-frame）
+          4. 构建 4 维特征 [real, imag, amp, phase_diff]
+          5. 对 Packet 维度取均值（10 个包 → 1 个稳定测量）
+          6. 子载波降采样
+          7. 输出 (N=3, S_down, 4)
+
+        返回 shape: (N=3, S_down, 4)
+          N      = 3 接收天线（= GAT 节点数）
+          S_down = 降采样后的子载波数
+          4      = [real, imag, amp, phase_diff]
         """
         mat   = sio.loadmat(path)
-        amp   = mat["CSIamp"].astype(np.float32)
-        phase = mat["CSIphase"].astype(np.float32)
+        amp   = mat["CSIamp"].astype(np.float32)      # (3, 114, 10)
+        phase = mat["CSIphase"].astype(np.float32)     # (3, 114, 10)
 
         amp   = np.nan_to_num(amp,   nan=0.0, posinf=0.0, neginf=0.0)
         phase = np.nan_to_num(phase, nan=0.0, posinf=0.0, neginf=0.0)
 
-        phase      = np.unwrap(phase, axis=-1)
-        phase_diff = np.diff(phase, axis=-1)
-        phase_diff = np.concatenate([phase_diff, phase_diff[..., -1:]], axis=-1)
+        # Phase unwrap（沿子载波维度 axis=1）
+        phase      = np.unwrap(phase, axis=1)
+        phase_diff = np.diff(phase, axis=1)
+        # 补齐最后一个子载波（复制最后一个差分值）
+        phase_diff = np.concatenate([phase_diff, phase_diff[:, -1:, :]], axis=1)
+        # phase_diff shape: (3, 114, 10)
 
-        # 幅度归一化
+        # 幅度归一化（全局 per-frame）
         mean = np.mean(amp)
         std  = max(float(np.std(amp)), 1e-6)
         amp  = (amp - mean) / std
@@ -144,15 +177,17 @@ class MMFiDataset(Dataset):
         real = amp * np.cos(phase)
         imag = amp * np.sin(phase)
 
-        # csi: (Tx, S, P, 4)
+        # 堆叠 4 维特征
+        # shape: (3, 114, 10, 4) = (Rx, Subcarrier, Packet, Feature)
         csi = np.stack([real, imag, amp, phase_diff], axis=-1)
 
-        # 天线降采样：每隔 2 取 1
-        csi = csi[:, ::2, :, :]          # (Tx, N, P, 4)
+        # 对 Packet 维度取均值 → 每帧一个稳定的 CSI 测量
+        # (3, 114, 10, 4) → (3, 114, 4)
+        csi = csi.mean(axis=2)
 
-        # 合并 Tx 维度到 N（多根发射天线视为多个节点）
-        Tx, N, P, C = csi.shape
-        csi = csi.reshape(Tx * N, P, C)  # (N_total, P, 4)
+        # 子载波降采样
+        # (3, 114, 4) → (3, 114//ds, 4)
+        csi = csi[:, ::self.sub_downsample, :]
 
         return np.nan_to_num(csi).astype(np.float32)
 
@@ -170,21 +205,15 @@ class MMFiDataset(Dataset):
 
     def __getitem__(self, idx):
         sample  = self.samples[idx]
-        # csi_seq: (T, N, P, 4)
+        # csi_seq: (T, N=3, S_down, 4)
         csi_seq = np.stack([
             self.load_csi(sample["csi_dir"], f)
             for f in sample["frames"]
         ])
 
-        if not self.keep_spatial:
-            # 向后兼容：对 N 维度加权聚合 → (T, P, 4)，再 unsqueeze → (T, 1, P, 4)
-            node_var = np.var(csi_seq, axis=(2, 3))        # (T, N)
-            node_w   = node_var / (node_var.sum(axis=1, keepdims=True) + 1e-6)
-            csi_seq  = (csi_seq * node_w[:, :, None, None]).sum(axis=1, keepdims=True)
-
-        # 将 P*4 展平为特征维度 → (T, N, P*4)
-        T, N, P, C = csi_seq.shape
-        csi_seq = csi_seq.reshape(T, N, P * C)
+        # 将 S_down × 4 展平为特征维度 → (T, N=3, S_down*4)
+        T, N, S, C = csi_seq.shape
+        csi_seq = csi_seq.reshape(T, N, S * C)
 
         pose = sample["gt"].copy()   # (T, J, 3)
 
