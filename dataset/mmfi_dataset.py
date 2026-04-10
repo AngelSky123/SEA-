@@ -40,7 +40,7 @@ class MMFiDataset(Dataset):
     """
 
     def __init__(self, root, envs, seq_len=20, cache_dir=None,
-                 sub_downsample=2):
+                 sub_downsample=1):
         """
         sub_downsample : int
             子载波降采样倍率。
